@@ -42,3 +42,7 @@ Makefile
 
 # Project-specific
 *.flp.bak
+
+# Claude Code
+.claude
+.claude\settings.local.json
