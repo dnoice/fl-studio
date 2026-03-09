@@ -1,0 +1,136 @@
+"""Rhythm Generator - Generate rhythmic patterns using Euclidean and polyrhythmic algorithms.
+
+Creates rhythmic note patterns from mathematical distributions,
+with support for Euclidean rhythms, polyrhythms, and density-based generation.
+"""
+
+import flpianoroll as flp
+import math
+
+
+RHYTHM_MODES = [
+    'Euclidean',
+    'Polyrhythm (2 layers)',
+    'Density Gradient',
+    'Syncopated',
+    'Dotted',
+]
+
+NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+
+
+def euclidean_rhythm(onsets, pulses):
+    """Bresenham-based Euclidean rhythm generator."""
+    if pulses <= 0:
+        return []
+    if onsets >= pulses:
+        return [True] * pulses
+    if onsets <= 0:
+        return [False] * pulses
+    slope = onsets / pulses
+    previous = -1
+    result = []
+    for i in range(pulses):
+        current = int(i * slope)
+        result.append(current != previous)
+        previous = current
+    return result
+
+
+def rotate_list(lst, shift):
+    """Rotate a list by shift positions."""
+    if not lst:
+        return lst
+    shift = shift % len(lst)
+    return lst[shift:] + lst[:shift]
+
+
+def createDialog():
+    form = flp.ScriptDialog(
+        'Rhythm Generator',
+        'Generates rhythmic patterns using mathematical algorithms.\r\n'
+        'Euclidean: distributes N onsets evenly across M pulses.\r\n'
+        'Polyrhythm: overlays two Euclidean layers.\r\n'
+        'Pattern Length is in 16th notes.'
+    )
+    form.AddInputCombo('Mode', RHYTHM_MODES, 0)
+    form.AddInputKnobInt('Pattern Length', 16, 2, 64)
+    form.AddInputKnobInt('Onsets', 5, 1, 32)
+    form.AddInputKnobInt('Rotation', 0, 0, 32)
+    form.AddInputKnobInt('Layer 2 Onsets', 3, 1, 16)
+    form.AddInputKnobInt('Note Number', 60, 0, 127)
+    form.AddInputKnob('Velocity', 0.8, 0.1, 1.0)
+    form.AddInputKnob('Note Length', 1.0, 0.1, 4.0)
+    form.AddInputKnobInt('Repeats', 1, 1, 8)
+    return form
+
+
+def apply(form):
+    mode = int(form.GetInputValue('Mode'))
+    pulses = int(form.GetInputValue('Pattern Length'))
+    onsets = int(form.GetInputValue('Onsets'))
+    rotation = int(form.GetInputValue('Rotation'))
+    layer2_onsets = int(form.GetInputValue('Layer 2 Onsets'))
+    note_num = int(form.GetInputValue('Note Number'))
+    velocity = form.GetInputValue('Velocity')
+    note_len_mult = form.GetInputValue('Note Length')
+    repeats = int(form.GetInputValue('Repeats'))
+
+    step_ticks = flp.score.PPQ // 4  # 16th note
+    note_length = int(step_ticks * note_len_mult)
+
+    # Generate rhythm pattern
+    if mode == 0:  # Euclidean
+        pattern = euclidean_rhythm(onsets, pulses)
+        pattern = rotate_list(pattern, rotation)
+
+    elif mode == 1:  # Polyrhythm
+        layer1 = euclidean_rhythm(onsets, pulses)
+        layer2 = euclidean_rhythm(layer2_onsets, pulses)
+        layer1 = rotate_list(layer1, rotation)
+        # Combine layers
+        pattern = [a or b for a, b in zip(layer1, layer2)]
+
+    elif mode == 2:  # Density Gradient
+        pattern = []
+        for i in range(pulses):
+            t = i / pulses
+            threshold = 0.3 + 0.5 * math.sin(t * math.pi)
+            density = onsets / pulses
+            pattern.append(density > (1 - threshold))
+
+    elif mode == 3:  # Syncopated
+        base = euclidean_rhythm(onsets, pulses)
+        base = rotate_list(base, rotation)
+        # Shift some hits to off-beats
+        pattern = [False] * pulses
+        for i, hit in enumerate(base):
+            if hit:
+                # Shift odd-indexed hits by one step
+                new_pos = (i + 1) % pulses if i % 2 == 1 else i
+                pattern[new_pos] = True
+
+    elif mode == 4:  # Dotted
+        pattern = [False] * pulses
+        pos = 0
+        count = 0
+        while pos < pulses and count < onsets:
+            pattern[pos] = True
+            pos += 3  # Dotted = 3 sixteenth notes
+            count += 1
+
+    else:
+        pattern = euclidean_rhythm(onsets, pulses)
+
+    # Write notes
+    for rep in range(repeats):
+        time_offset = rep * pulses * step_ticks
+        for step, is_onset in enumerate(pattern):
+            if is_onset:
+                note = flp.Note()
+                note.number = note_num
+                note.time = step * step_ticks + time_offset
+                note.length = note_length
+                note.velocity = velocity
+                note.color = 0
+                flp.score.addNote(note)

@@ -1,0 +1,95 @@
+"""Scale Quantizer - Snap notes to the nearest note in a chosen scale.
+
+Supports all major modes, pentatonic, blues, and exotic scales
+matching FL Studio's built-in scale definitions.
+"""
+
+import flpianoroll as flp
+
+
+SCALES = {
+    'Major (Ionian)':     (0, 2, 4, 5, 7, 9, 11),
+    'Dorian':             (0, 2, 3, 5, 7, 9, 10),
+    'Phrygian':           (0, 1, 3, 5, 7, 8, 10),
+    'Lydian':             (0, 2, 4, 6, 7, 9, 11),
+    'Mixolydian':         (0, 2, 4, 5, 7, 9, 10),
+    'Natural Minor':      (0, 2, 3, 5, 7, 8, 10),
+    'Locrian':            (0, 1, 3, 5, 6, 8, 10),
+    'Harmonic Minor':     (0, 2, 3, 5, 7, 8, 11),
+    'Melodic Minor':      (0, 2, 3, 5, 7, 9, 11),
+    'Major Pentatonic':   (0, 2, 4, 7, 9),
+    'Minor Pentatonic':   (0, 3, 5, 7, 10),
+    'Blues':              (0, 3, 5, 6, 7, 10),
+    'Whole Tone':         (0, 2, 4, 6, 8, 10),
+    'Diminished':         (0, 1, 3, 4, 6, 7, 9, 10),
+    'Arabic':             (0, 1, 4, 5, 7, 8, 11),
+    'Hungarian Minor':    (0, 2, 3, 6, 7, 8, 11),
+    'Japanese Insen':     (0, 1, 5, 7, 10),
+}
+
+SCALE_NAMES = list(SCALES.keys())
+ROOT_NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+
+
+def quantize_to_scale(note_num, root, intervals, direction):
+    """Snap a note number to the nearest scale degree."""
+    pitch_class = (note_num - root) % 12
+    if pitch_class in intervals:
+        return note_num
+
+    if direction == 0:  # Nearest
+        best = note_num
+        best_dist = 13
+        octave_base = note_num - (note_num % 12)
+        for interval in intervals:
+            for offset in (-12, 0, 12):
+                candidate = octave_base + root + interval + offset
+                dist = abs(candidate - note_num)
+                if dist < best_dist:
+                    best_dist = dist
+                    best = candidate
+        return max(0, min(127, best))
+
+    elif direction == 1:  # Up
+        for i in range(1, 12):
+            candidate = (pitch_class + i) % 12
+            if candidate in intervals:
+                result = note_num + i
+                return min(127, result)
+
+    else:  # Down
+        for i in range(1, 12):
+            candidate = (pitch_class - i) % 12
+            if candidate in intervals:
+                result = note_num - i
+                return max(0, result)
+
+    return note_num
+
+
+def createDialog():
+    form = flp.ScriptDialog(
+        'Scale Quantizer',
+        'Snaps selected notes to the nearest note in the chosen scale.\r\n'
+        'Direction controls whether notes snap up, down, or to the nearest scale tone.'
+    )
+    form.AddInputCombo('Scale', SCALE_NAMES, 0)
+    form.AddInputCombo('Root Note', ROOT_NOTES, 0)
+    form.AddInputCombo('Direction', ['Nearest', 'Up', 'Down'], 0)
+    form.AddInputCheckbox('Selected Notes Only', True)
+    return form
+
+
+def apply(form):
+    scale_idx = int(form.GetInputValue('Scale'))
+    root = int(form.GetInputValue('Root Note'))
+    direction = int(form.GetInputValue('Direction'))
+    selected_only = form.GetInputValue('Selected Notes Only')
+
+    intervals = SCALES[SCALE_NAMES[scale_idx]]
+
+    for i in range(flp.score.noteCount):
+        note = flp.score.getNote(i)
+        if selected_only and not note.selected:
+            continue
+        note.number = quantize_to_scale(note.number, root, intervals, direction)

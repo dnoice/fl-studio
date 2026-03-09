@@ -1,0 +1,115 @@
+"""Auto Chop - Automatically detect transients and create regions in Edison.
+
+Analyzes the audio for transients (sudden level increases) and places
+region markers at each detected transient point for easy slicing.
+"""
+
+from enveditor import *
+import math
+
+
+def createDialog():
+    form = ScriptDialog(
+        'Auto Chop',
+        'Detects transients and adds region markers at each one.\r\n'
+        'Sensitivity controls how quiet a transient can be detected.\r\n'
+        'Min Gap prevents markers from being placed too close together.\r\n'
+        'Use Regions mode to create full regions or just markers.'
+    )
+    form.AddInputKnob('Sensitivity', 0.5, 0.0, 1.0)
+    form.AddInputKnob('Min Gap (ms)', 50.0, 10.0, 500.0)
+    form.AddInputKnob('Pre-Roll (ms)', 2.0, 0.0, 20.0)
+    form.AddInputCombo('Output', ['Regions', 'Markers Only'], 0)
+    form.AddInputCheckbox('Clear Existing', True)
+    form.AddInputKnob('Attack Time (ms)', 1.0, 0.1, 10.0)
+    return form
+
+
+def apply(form):
+    sensitivity = form.GetInputValue('Sensitivity')
+    min_gap_ms = form.GetInputValue('Min Gap (ms)')
+    pre_roll_ms = form.GetInputValue('Pre-Roll (ms)')
+    output_mode = int(form.GetInputValue('Output'))
+    clear_existing = form.GetInputValue('Clear Existing')
+    attack_ms = form.GetInputValue('Attack Time (ms)')
+
+    sample = EditorSample
+    sr = sample.SampleRate
+    length = sample.Length
+    num_channels = sample.NumChans
+
+    if length == 0:
+        return
+
+    # Clear existing regions if requested
+    if clear_existing:
+        while sample.RegionCount > 0:
+            sample.DeleteRegion(0)
+
+    # Parameters
+    min_gap_samples = int(min_gap_ms * sr / 1000)
+    pre_roll_samples = int(pre_roll_ms * sr / 1000)
+    attack_samples = max(1, int(attack_ms * sr / 1000))
+
+    # Threshold based on sensitivity
+    threshold = 0.001 + (1.0 - sensitivity) * 0.15
+
+    # Envelope followers
+    fast_coeff = 1.0 - math.exp(-1.0 / max(1, attack_samples))
+    slow_coeff = 1.0 - math.exp(-1.0 / max(1, int(sr * 0.05)))  # ~50ms
+
+    fast_env = 0.0
+    slow_env = 0.0
+
+    # Detection
+    transient_positions = []
+    last_transient = -min_gap_samples
+
+    for pos in range(length):
+        # Peak level across channels
+        peak = 0.0
+        for ch in range(num_channels):
+            val = abs(sample.GetSampleAt(pos, ch))
+            if val > peak:
+                peak = val
+
+        # Fast envelope
+        if peak > fast_env:
+            fast_env += (peak - fast_env) * fast_coeff
+        else:
+            fast_env += (peak - fast_env) * slow_coeff * 0.5
+
+        # Slow envelope
+        slow_env += (peak - slow_env) * slow_coeff
+
+        # Transient = fast envelope significantly exceeds slow envelope
+        diff = fast_env - slow_env
+        if diff > threshold and (pos - last_transient) > min_gap_samples:
+            # Apply pre-roll
+            marker_pos = max(0, pos - pre_roll_samples)
+            transient_positions.append(marker_pos)
+            last_transient = pos
+
+        # Progress
+        if pos % 20000 == 0:
+            Utils.ProgressMsg('Detecting transients...', pos, length)
+
+    if not transient_positions:
+        Utils.ShowMessage('No transients detected. Try increasing Sensitivity.')
+        return
+
+    # Add regions or markers
+    if output_mode == 0:  # Regions
+        for i, start in enumerate(transient_positions):
+            if i < len(transient_positions) - 1:
+                end = transient_positions[i + 1]
+            else:
+                end = length
+            name = f'Slice {i + 1}'
+            sample.AddRegion(name, start, end)
+    else:  # Markers only (use SampleEnd > Length to indicate marker)
+        for i, start in enumerate(transient_positions):
+            name = f'Marker {i + 1}'
+            sample.AddRegion(name, start, length + 1)
+
+    Utils.ShowMessage(f'Found {len(transient_positions)} transients.')

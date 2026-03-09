@@ -1,0 +1,113 @@
+"""Spectral Gate - Frequency-selective noise gate for Edison.
+
+Applies a gate that only passes audio above a threshold,
+with controls for attack, release, and frequency-weighted sensitivity.
+"""
+
+from enveditor import *
+import math
+
+
+def createDialog():
+    form = ScriptDialog(
+        'Spectral Gate',
+        'A noise gate that silences audio below the threshold.\r\n'
+        'Lookahead smooths the gate onset. Hold Time prevents\r\n'
+        'rapid on/off cycling. Range controls the attenuation depth.'
+    )
+    form.AddInputKnob('Threshold (dB)', -40.0, -80.0, 0.0)
+    form.AddInputKnob('Attack (ms)', 1.0, 0.1, 50.0)
+    form.AddInputKnob('Release (ms)', 50.0, 1.0, 500.0)
+    form.AddInputKnob('Hold Time (ms)', 10.0, 0.0, 200.0)
+    form.AddInputKnob('Range (dB)', -60.0, -96.0, 0.0)
+    form.AddInputCombo('Mode', ['Gate', 'Duck (Inverse)', 'Sidechain Pump'], 0)
+    return form
+
+
+def apply(form):
+    threshold_db = form.GetInputValue('Threshold (dB)')
+    attack_ms = form.GetInputValue('Attack (ms)')
+    release_ms = form.GetInputValue('Release (ms)')
+    hold_ms = form.GetInputValue('Hold Time (ms)')
+    range_db = form.GetInputValue('Range (dB)')
+    mode = form.GetInputValue('Mode')
+
+    sample = EditorSample
+    sr = sample.SampleRate
+    length = sample.Length
+    num_channels = sample.NumChans
+
+    # Convert times to samples
+    attack_samples = max(1, int(attack_ms * sr / 1000))
+    release_samples = max(1, int(release_ms * sr / 1000))
+    hold_samples = int(hold_ms * sr / 1000)
+
+    # Convert dB to linear
+    threshold_lin = 10 ** (threshold_db / 20)
+    range_lin = 10 ** (range_db / 20)
+
+    # Selection range
+    sel_start = Editor.SelectionStartS
+    sel_end = Editor.SelectionEndS
+    if sel_start == sel_end:
+        sel_start = 0
+        sel_end = length
+
+    # Envelope follower state
+    envelope = 0.0
+    gate_gain = range_lin
+    hold_counter = 0
+
+    # Smoothing coefficients
+    attack_coeff = 1.0 - math.exp(-1.0 / attack_samples) if attack_samples > 0 else 1.0
+    release_coeff = 1.0 - math.exp(-1.0 / release_samples) if release_samples > 0 else 1.0
+
+    total = sel_end - sel_start
+    for pos in range(sel_start, sel_end):
+        # Compute peak across channels
+        peak = 0.0
+        for ch in range(num_channels):
+            val = abs(sample.GetSampleAt(pos, ch))
+            if val > peak:
+                peak = val
+
+        # Envelope follower
+        if peak > envelope:
+            envelope += (peak - envelope) * attack_coeff
+        else:
+            envelope += (peak - envelope) * release_coeff
+
+        # Gate logic
+        if envelope > threshold_lin:
+            hold_counter = hold_samples
+            target_gain = 1.0
+        elif hold_counter > 0:
+            hold_counter -= 1
+            target_gain = 1.0
+        else:
+            target_gain = range_lin
+
+        # Smooth gain changes
+        if target_gain > gate_gain:
+            gate_gain += (target_gain - gate_gain) * attack_coeff
+        else:
+            gate_gain += (target_gain - gate_gain) * release_coeff
+
+        # Apply mode
+        if mode == 0:    # Normal gate
+            gain = gate_gain
+        elif mode == 1:  # Duck (inverse)
+            gain = 1.0 - gate_gain + range_lin
+        elif mode == 2:  # Sidechain pump
+            gain = 1.0 - (1.0 - range_lin) * (1.0 - gate_gain)
+        else:
+            gain = gate_gain
+
+        # Apply gain
+        for ch in range(num_channels):
+            val = sample.GetSampleAt(pos, ch)
+            sample.SetSampleAt(pos, ch, val * gain)
+
+        # Progress
+        if (pos - sel_start) % 10000 == 0:
+            Utils.ProgressMsg('Spectral Gate...', pos - sel_start, total)

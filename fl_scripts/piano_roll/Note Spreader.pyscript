@@ -1,0 +1,111 @@
+"""Note Spreader - Distribute notes across pan, color groups, and velocity layers.
+
+Useful for creating stereo width, assigning MIDI channels for multi-timbral
+instruments, or creating velocity-layered parts.
+"""
+
+import flpianoroll as flp
+import math
+
+
+SPREAD_MODES = [
+    'Pan - Left to Right by Pitch',
+    'Pan - Alternate Left/Right',
+    'Pan - Random Spread',
+    'Color - By Pitch Class',
+    'Color - By Octave',
+    'Color - Alternate',
+    'Velocity - Layer by Pitch',
+    'Filter Cutoff - By Pitch',
+    'Combined - Pan + Color',
+]
+
+
+def createDialog():
+    form = flp.ScriptDialog(
+        'Note Spreader',
+        'Distributes notes across pan, color, velocity, or filter parameters.\r\n'
+        'Pan modes spread notes across the stereo field.\r\n'
+        'Color modes assign MIDI channels for multi-timbral use.\r\n'
+        'Amount controls the intensity of the spread.'
+    )
+    form.AddInputCombo('Spread Mode', SPREAD_MODES, 0)
+    form.AddInputKnob('Amount', 1.0, 0.0, 1.0)
+    form.AddInputKnobInt('Max Colors', 16, 2, 16)
+    form.AddInputCheckbox('Selected Notes Only', True)
+    return form
+
+
+def apply(form):
+    spread_mode = int(form.GetInputValue('Spread Mode'))
+    amount = form.GetInputValue('Amount')
+    max_colors = int(form.GetInputValue('Max Colors'))
+    selected_only = form.GetInputValue('Selected Notes Only')
+
+    notes = []
+    for i in range(flp.score.noteCount):
+        note = flp.score.getNote(i)
+        if selected_only and not note.selected:
+            continue
+        notes.append(note)
+
+    if not notes:
+        return
+
+    # Get pitch range for normalization
+    pitches = [n.number for n in notes]
+    min_pitch = min(pitches)
+    max_pitch = max(pitches)
+    pitch_range = max_pitch - min_pitch
+
+    # Simple RNG for random modes
+    import time as _time
+    rng_state = _time.time_ns()
+
+    for idx, note in enumerate(notes):
+        t = (note.number - min_pitch) / pitch_range if pitch_range > 0 else 0.5
+
+        if spread_mode == 0:    # Pan - Left to Right by Pitch
+            note.pan = 0.5 + (t - 0.5) * amount
+
+        elif spread_mode == 1:  # Pan - Alternate Left/Right
+            if idx % 2 == 0:
+                note.pan = 0.5 - 0.4 * amount
+            else:
+                note.pan = 0.5 + 0.4 * amount
+
+        elif spread_mode == 2:  # Pan - Random Spread
+            rng_state = (rng_state * 1103515245 + 12345) & 0x7FFFFFFF
+            rand_val = rng_state / 0x7FFFFFFF
+            note.pan = 0.5 + (rand_val - 0.5) * amount
+
+        elif spread_mode == 3:  # Color - By Pitch Class
+            pitch_class = note.number % 12
+            note.color = pitch_class % max_colors
+
+        elif spread_mode == 4:  # Color - By Octave
+            octave = note.number // 12
+            note.color = octave % max_colors
+
+        elif spread_mode == 5:  # Color - Alternate
+            note.color = idx % max_colors
+
+        elif spread_mode == 6:  # Velocity - Layer by Pitch
+            # Higher notes get higher velocity
+            target_vel = 0.4 + 0.6 * t
+            note.velocity = note.velocity + (target_vel - note.velocity) * amount
+
+        elif spread_mode == 7:  # Filter Cutoff - By Pitch
+            # Map pitch to filter cutoff
+            note.fcut = 0.5 + (t - 0.5) * amount
+
+        elif spread_mode == 8:  # Combined - Pan + Color
+            # Pan by pitch position
+            note.pan = 0.5 + (t - 0.5) * amount
+            # Color by pitch class
+            note.color = (note.number % 12) % max_colors
+
+        # Clamp values
+        note.pan = max(0.0, min(1.0, note.pan))
+        note.velocity = max(0.0, min(1.0, note.velocity))
+        note.fcut = max(0.0, min(1.0, note.fcut))

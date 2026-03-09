@@ -1,0 +1,107 @@
+"""Transient Shaper - Enhance or reduce transients in Edison.
+
+Uses an envelope follower to detect transients and apply
+gain shaping to the attack and sustain portions of the audio.
+"""
+
+from enveditor import *
+import math
+
+
+def createDialog():
+    form = ScriptDialog(
+        'Transient Shaper',
+        'Shape the attack and sustain of audio.\r\n'
+        'Positive Attack boosts transients, negative softens them.\r\n'
+        'Sustain controls the body of the sound after the attack.\r\n'
+        'Sensitivity adjusts transient detection threshold.'
+    )
+    form.AddInputKnob('Attack', 0.0, -1.0, 1.0)
+    form.AddInputKnob('Sustain', 0.0, -1.0, 1.0)
+    form.AddInputKnob('Sensitivity', 0.5, 0.0, 1.0)
+    form.AddInputKnob('Attack Time (ms)', 5.0, 0.5, 50.0)
+    form.AddInputKnob('Release Time (ms)', 100.0, 10.0, 500.0)
+    form.AddInputKnob('Output Gain (dB)', 0.0, -12.0, 12.0)
+    return form
+
+
+def apply(form):
+    attack_amt = form.GetInputValue('Attack')
+    sustain_amt = form.GetInputValue('Sustain')
+    sensitivity = form.GetInputValue('Sensitivity')
+    attack_ms = form.GetInputValue('Attack Time (ms)')
+    release_ms = form.GetInputValue('Release Time (ms)')
+    output_gain_db = form.GetInputValue('Output Gain (dB)')
+
+    sample = EditorSample
+    sr = sample.SampleRate
+    length = sample.Length
+    num_channels = sample.NumChans
+
+    output_gain = 10 ** (output_gain_db / 20)
+
+    # Convert ms to samples
+    attack_samples = max(1, int(attack_ms * sr / 1000))
+    release_samples = max(1, int(release_ms * sr / 1000))
+
+    # Smoothing coefficients
+    fast_coeff = 1.0 - math.exp(-1.0 / max(1, attack_samples // 2))
+    slow_coeff = 1.0 - math.exp(-1.0 / release_samples)
+
+    # Selection range
+    sel_start = Editor.SelectionStartS
+    sel_end = Editor.SelectionEndS
+    if sel_start == sel_end:
+        sel_start = 0
+        sel_end = length
+
+    # Envelope followers
+    fast_env = 0.0
+    slow_env = 0.0
+
+    # Scale sensitivity to threshold
+    threshold = 0.01 + (1.0 - sensitivity) * 0.2
+
+    total = sel_end - sel_start
+    for pos in range(sel_start, sel_end):
+        # Compute RMS-like level across channels
+        level = 0.0
+        for ch in range(num_channels):
+            val = sample.GetSampleAt(pos, ch)
+            level += val * val
+        level = math.sqrt(level / num_channels) if num_channels > 0 else 0
+
+        # Fast envelope (follows attacks)
+        if level > fast_env:
+            fast_env += (level - fast_env) * fast_coeff
+        else:
+            fast_env += (level - fast_env) * slow_coeff
+
+        # Slow envelope (follows sustain)
+        slow_env += (level - slow_env) * slow_coeff
+
+        # Transient detector: difference between fast and slow envelopes
+        transient = max(0, fast_env - slow_env)
+        is_transient = transient > threshold
+
+        # Compute gain
+        if is_transient:
+            # Attack phase - apply attack shaping
+            shape_gain = 1.0 + attack_amt * min(1.0, transient / max(threshold, 0.001))
+        else:
+            # Sustain phase
+            shape_gain = 1.0 + sustain_amt * 0.5
+
+        # Apply gain with output compensation
+        final_gain = shape_gain * output_gain
+
+        for ch in range(num_channels):
+            val = sample.GetSampleAt(pos, ch)
+            # Soft clip to prevent harsh clipping
+            result = val * final_gain
+            if abs(result) > 1.0:
+                result = math.copysign(1.0 - 1.0 / (1.0 + abs(result)), result)
+            sample.SetSampleAt(pos, ch, result)
+
+        if (pos - sel_start) % 10000 == 0:
+            Utils.ProgressMsg('Transient Shaper...', pos - sel_start, total)

@@ -1,0 +1,116 @@
+"""Velocity Curves - Apply mathematical velocity curves to selected notes.
+
+Supports linear ramps, exponential, logarithmic, sine wave, random,
+and custom accent patterns across the time span of selected notes.
+"""
+
+import flpianoroll as flp
+import math
+import time
+
+
+CURVE_TYPES = [
+    'Linear Ramp',
+    'Exponential',
+    'Logarithmic',
+    'Sine Wave',
+    'Cosine Fade',
+    'Triangle',
+    'Random',
+    'Accent Pattern (4/4)',
+    'Crescendo',
+    'Decrescendo',
+]
+
+
+def rand_float(seed=None):
+    """Simple pseudo-random float generator 0.0-1.0."""
+    state = time.time_ns() if seed is None else seed
+    while True:
+        state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+        yield state / 0x7FFFFFFF
+
+
+def createDialog():
+    form = flp.ScriptDialog(
+        'Velocity Curves',
+        'Apply velocity curves across the time span of selected notes.\r\n'
+        'Start/End Velocity set the range. Curve Type shapes the transition.\r\n'
+        'Strength blends between original velocity and the curve.'
+    )
+    form.AddInputCombo('Curve Type', CURVE_TYPES, 0)
+    form.AddInputKnob('Start Velocity', 0.3, 0.0, 1.0)
+    form.AddInputKnob('End Velocity', 1.0, 0.0, 1.0)
+    form.AddInputKnob('Strength', 1.0, 0.0, 1.0)
+    form.AddInputKnob('Sine Cycles', 1.0, 0.25, 8.0)
+    form.AddInputCheckbox('Selected Notes Only', True)
+    return form
+
+
+def apply(form):
+    curve_type = int(form.GetInputValue('Curve Type'))
+    vel_start = form.GetInputValue('Start Velocity')
+    vel_end = form.GetInputValue('End Velocity')
+    strength = form.GetInputValue('Strength')
+    sine_cycles = form.GetInputValue('Sine Cycles')
+    selected_only = form.GetInputValue('Selected Notes Only')
+
+    # Gather notes
+    notes = []
+    for i in range(flp.score.noteCount):
+        note = flp.score.getNote(i)
+        if selected_only and not note.selected:
+            continue
+        notes.append(note)
+
+    if not notes:
+        return
+
+    # Time range
+    min_time = min(n.time for n in notes)
+    max_time = max(n.time for n in notes)
+    time_span = max_time - min_time
+
+    rng = rand_float()
+
+    for note in notes:
+        t = (note.time - min_time) / time_span if time_span > 0 else 0.0
+
+        # Compute curve value
+        if curve_type == 0:    # Linear Ramp
+            curve_val = t
+        elif curve_type == 1:  # Exponential
+            curve_val = t ** 2.5
+        elif curve_type == 2:  # Logarithmic
+            curve_val = math.log(1 + t * 9) / math.log(10)
+        elif curve_type == 3:  # Sine Wave
+            curve_val = 0.5 + 0.5 * math.sin(2 * math.pi * sine_cycles * t)
+        elif curve_type == 4:  # Cosine Fade
+            curve_val = 0.5 - 0.5 * math.cos(math.pi * t)
+        elif curve_type == 5:  # Triangle
+            curve_val = 1.0 - abs(2.0 * t - 1.0)
+        elif curve_type == 6:  # Random
+            curve_val = next(rng)
+        elif curve_type == 7:  # Accent Pattern (4/4)
+            beat_pos = (note.time / flp.score.PPQ) % 4
+            if beat_pos < 0.1:      # Beat 1 (strong)
+                curve_val = 1.0
+            elif abs(beat_pos - 2) < 0.1:  # Beat 3 (medium)
+                curve_val = 0.85
+            elif abs(beat_pos - 1) < 0.1 or abs(beat_pos - 3) < 0.1:  # Beats 2,4
+                curve_val = 0.65
+            else:  # Off-beats
+                curve_val = 0.5
+        elif curve_type == 8:  # Crescendo
+            curve_val = t ** 1.5
+        elif curve_type == 9:  # Decrescendo
+            curve_val = (1.0 - t) ** 1.5
+        else:
+            curve_val = t
+
+        # Map curve value to velocity range
+        target_vel = vel_start + (vel_end - vel_start) * curve_val
+
+        # Blend with original velocity using strength
+        note.velocity = note.velocity + (target_vel - note.velocity) * strength
+        note.velocity = max(0.0, min(1.0, note.velocity))

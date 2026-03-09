@@ -1,0 +1,117 @@
+"""Strum Generator - Convert chords into strummed patterns.
+
+Offsets note start times within chords to simulate guitar strumming,
+harp arpeggiation, or other staggered-note techniques.
+"""
+
+import flpianoroll as flp
+
+
+STRUM_MODES = [
+    'Down (Low to High)',
+    'Up (High to Low)',
+    'Down-Up Alternating',
+    'Random Scatter',
+    'Fan Out (Center)',
+    'Fan In (Edges)',
+]
+
+
+def createDialog():
+    form = flp.ScriptDialog(
+        'Strum Generator',
+        'Offsets note start times within chords to create strumming effects.\r\n'
+        'Notes at the same time position are treated as a chord.\r\n'
+        'Strum Time is the total spread in 16th notes.'
+    )
+    form.AddInputCombo('Strum Mode', STRUM_MODES, 0)
+    form.AddInputKnob('Strum Time', 0.25, 0.01, 2.0)
+    form.AddInputKnob('Velocity Fade', 0.0, -0.3, 0.3)
+    form.AddInputCheckbox('Shorten Notes', True)
+    form.AddInputCheckbox('Selected Notes Only', True)
+    return form
+
+
+def apply(form):
+    strum_mode = int(form.GetInputValue('Strum Mode'))
+    strum_time = form.GetInputValue('Strum Time')
+    vel_fade = form.GetInputValue('Velocity Fade')
+    shorten = form.GetInputValue('Shorten Notes')
+    selected_only = form.GetInputValue('Selected Notes Only')
+
+    # Strum time in ticks (input is in 16th note units)
+    strum_ticks = int(strum_time * flp.score.PPQ * 0.25)
+
+    # Group notes by start time (chord groups)
+    notes = []
+    for i in range(flp.score.noteCount):
+        note = flp.score.getNote(i)
+        if selected_only and not note.selected:
+            continue
+        notes.append(note)
+
+    if not notes:
+        return
+
+    # Group notes that start at the same time (within small tolerance)
+    tolerance = flp.score.PPQ // 32  # ~1/128th note tolerance
+    notes.sort(key=lambda n: n.time)
+
+    chord_groups = []
+    current_group = [notes[0]]
+    for n in notes[1:]:
+        if abs(n.time - current_group[0].time) <= tolerance:
+            current_group.append(n)
+        else:
+            if len(current_group) > 1:
+                chord_groups.append(current_group)
+            current_group = [n]
+    if len(current_group) > 1:
+        chord_groups.append(current_group)
+
+    # Apply strum to each chord group
+    alt_down = True
+    import time as _time
+    rng_state = _time.time_ns()
+
+    for group in chord_groups:
+        # Sort by pitch
+        group.sort(key=lambda n: n.number)
+        count = len(group)
+        if count < 2:
+            continue
+
+        for i, note in enumerate(group):
+            if strum_mode == 0:      # Down
+                t = i / (count - 1) if count > 1 else 0
+            elif strum_mode == 1:    # Up
+                t = (count - 1 - i) / (count - 1) if count > 1 else 0
+            elif strum_mode == 2:    # Alternating
+                if alt_down:
+                    t = i / (count - 1) if count > 1 else 0
+                else:
+                    t = (count - 1 - i) / (count - 1) if count > 1 else 0
+            elif strum_mode == 3:    # Random
+                rng_state = (rng_state * 1103515245 + 12345) & 0x7FFFFFFF
+                t = (rng_state / 0x7FFFFFFF)
+            elif strum_mode == 4:    # Fan Out (center first)
+                mid = (count - 1) / 2
+                t = abs(i - mid) / mid if mid > 0 else 0
+            elif strum_mode == 5:    # Fan In (edges first)
+                mid = (count - 1) / 2
+                t = 1.0 - (abs(i - mid) / mid if mid > 0 else 0)
+            else:
+                t = i / (count - 1) if count > 1 else 0
+
+            offset = int(t * strum_ticks)
+            note.time = note.time + offset
+
+            # Shorten note to maintain original end time
+            if shorten and offset > 0:
+                note.length = max(1, note.length - offset)
+
+            # Apply velocity fade
+            vel_change = vel_fade * t
+            note.velocity = max(0.0, min(1.0, note.velocity + vel_change))
+
+        alt_down = not alt_down

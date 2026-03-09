@@ -1,0 +1,121 @@
+"""Chord Stamper - Stamp chord shapes onto selected notes in the piano roll.
+
+Select one or more notes, choose a chord type, and this script will
+create a full chord at each selected note position using that note as the root.
+"""
+
+import flpianoroll as flp
+
+
+CHORD_INTERVALS = {
+    'Major':          (0, 4, 7),
+    'Minor':          (0, 3, 7),
+    'Diminished':     (0, 3, 6),
+    'Augmented':      (0, 4, 8),
+    'Sus2':           (0, 2, 7),
+    'Sus4':           (0, 5, 7),
+    'Major 7th':      (0, 4, 7, 11),
+    'Minor 7th':      (0, 3, 7, 10),
+    'Dominant 7th':   (0, 4, 7, 10),
+    'Dim 7th':        (0, 3, 6, 9),
+    'Half-Dim 7th':   (0, 3, 6, 10),
+    'Major 9th':      (0, 4, 7, 11, 14),
+    'Minor 9th':      (0, 3, 7, 10, 14),
+    'Dominant 9th':   (0, 4, 7, 10, 14),
+    'Add9':           (0, 4, 7, 14),
+    'Minor Add9':     (0, 3, 7, 14),
+    'Major 6th':      (0, 4, 7, 9),
+    'Minor 6th':      (0, 3, 7, 9),
+    'Power (5th)':    (0, 7),
+}
+
+CHORD_NAMES = list(CHORD_INTERVALS.keys())
+
+
+def createDialog():
+    form = flp.ScriptDialog(
+        'Chord Stamper',
+        'Stamps a chord shape at each selected note position.\r\n'
+        'The original note becomes the chord root.\r\n'
+        'Inversion shifts the lowest N notes up an octave.'
+    )
+    form.AddInputCombo('Chord Type', CHORD_NAMES, 0)
+    form.AddInputKnobInt('Inversion', 0, 0, 3)
+    form.AddInputKnob('Velocity Scale', 1.0, 0.1, 1.5)
+    form.AddInputCheckbox('Keep Original Notes', True)
+    form.AddInputCheckbox('Selected Notes Only', True)
+    return form
+
+
+def apply(form):
+    chord_idx = int(form.GetInputValue('Chord Type'))
+    inversion = int(form.GetInputValue('Inversion'))
+    vel_scale = form.GetInputValue('Velocity Scale')
+    keep_original = form.GetInputValue('Keep Original Notes')
+    selected_only = form.GetInputValue('Selected Notes Only')
+
+    intervals = CHORD_INTERVALS[CHORD_NAMES[chord_idx]]
+
+    # Collect source notes
+    source_notes = []
+    other_notes = []
+    for i in range(flp.score.noteCount):
+        note = flp.score.getNote(i)
+        if selected_only and not note.selected:
+            other_notes.append(note)
+        else:
+            source_notes.append(note)
+
+    if not source_notes:
+        return
+
+    # Build new notes
+    new_notes = list(other_notes)
+
+    for src in source_notes:
+        # Build chord intervals with inversion
+        chord_intervals = list(intervals)
+        for inv in range(min(inversion, len(chord_intervals) - 1)):
+            chord_intervals[inv] += 12
+        chord_intervals.sort()
+
+        for i, interval in enumerate(chord_intervals):
+            if interval == 0 and keep_original:
+                # Keep original note as-is for the root
+                new_notes.append(src)
+                continue
+
+            pitch = src.number + interval
+            if pitch > 127:
+                continue
+
+            note = flp.Note()
+            note.number = pitch
+            note.time = src.time
+            note.length = src.length
+            note.velocity = min(1.0, src.velocity * vel_scale)
+            note.color = src.color
+            note.pan = src.pan
+            note.fcut = src.fcut
+            note.fres = src.fres
+            note.group = src.group
+            new_notes.append(note)
+
+        # Add root if not keeping original
+        if not keep_original:
+            note = flp.Note()
+            note.number = src.number
+            note.time = src.time
+            note.length = src.length
+            note.velocity = src.velocity
+            note.color = src.color
+            note.pan = src.pan
+            note.fcut = src.fcut
+            note.fres = src.fres
+            note.group = src.group
+            new_notes.append(note)
+
+    # Replace score
+    flp.score.clearNotes(True)
+    for note in new_notes:
+        flp.score.addNote(note)

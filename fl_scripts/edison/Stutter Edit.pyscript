@@ -1,0 +1,154 @@
+"""Stutter Edit - Create stutter, glitch, and repeat effects in Edison.
+
+Divides the selection into segments and applies repeat, reverse,
+fade, and pitch effects for creative sound design.
+"""
+
+from enveditor import *
+import math
+
+
+STUTTER_MODES = [
+    'Repeat',
+    'Repeat + Fade Out',
+    'Repeat + Pitch Down',
+    'Repeat + Reverse Alternate',
+    'Glitch (Random Rearrange)',
+    'Tape Stop',
+]
+
+
+def createDialog():
+    form = ScriptDialog(
+        'Stutter Edit',
+        'Creates stutter and glitch effects on the selection.\r\n'
+        'Slice Size determines the repeat segment length.\r\n'
+        'Repeats is how many times each slice repeats.\r\n'
+        'Different modes apply various effects to the repeats.'
+    )
+    form.AddInputCombo('Mode', STUTTER_MODES, 0)
+    form.AddInputKnob('Slice Size (ms)', 50.0, 5.0, 500.0)
+    form.AddInputKnobInt('Repeats', 4, 1, 16)
+    form.AddInputKnob('Dry/Wet', 1.0, 0.0, 1.0)
+    form.AddInputKnob('Fade Amount', 0.5, 0.0, 1.0)
+    return form
+
+
+def apply(form):
+    mode = int(form.GetInputValue('Mode'))
+    slice_ms = form.GetInputValue('Slice Size (ms)')
+    repeats = int(form.GetInputValue('Repeats'))
+    dry_wet = form.GetInputValue('Dry/Wet')
+    fade_amount = form.GetInputValue('Fade Amount')
+
+    sample = EditorSample
+    sr = sample.SampleRate
+    length = sample.Length
+    num_channels = sample.NumChans
+
+    sel_start = Editor.SelectionStartS
+    sel_end = Editor.SelectionEndS
+    if sel_start == sel_end:
+        sel_start = 0
+        sel_end = length
+
+    slice_samples = max(1, int(slice_ms * sr / 1000))
+    sel_length = sel_end - sel_start
+
+    if sel_length < slice_samples:
+        return
+
+    # Store original slice data
+    def get_slice(start, length):
+        data = []
+        for ch in range(num_channels):
+            ch_data = []
+            for i in range(length):
+                pos = start + i
+                if pos < sample.Length:
+                    ch_data.append(sample.GetSampleAt(pos, ch))
+                else:
+                    ch_data.append(0.0)
+            data.append(ch_data)
+        return data
+
+    total = sel_length
+    write_pos = sel_start
+
+    # Simple LCG for glitch mode
+    rng = (sel_length * 1103515245 + 12345) & 0x7FFFFFFF
+
+    while write_pos < sel_end:
+        remaining = sel_end - write_pos
+        current_slice_len = min(slice_samples, remaining)
+
+        # Get the original slice
+        original = get_slice(write_pos, current_slice_len)
+
+        # Write repeated slices
+        for rep in range(repeats):
+            rep_start = write_pos + rep * current_slice_len
+            if rep_start >= sel_end:
+                break
+
+            for i in range(current_slice_len):
+                out_pos = rep_start + i
+                if out_pos >= sel_end:
+                    break
+
+                t = rep / max(1, repeats - 1)  # Normalized repeat position
+                s = i / max(1, current_slice_len - 1)  # Position within slice
+
+                for ch in range(num_channels):
+                    orig_val = original[ch][i] if i < len(original[ch]) else 0.0
+
+                    if mode == 0:    # Simple repeat
+                        new_val = orig_val
+
+                    elif mode == 1:  # Repeat + Fade Out
+                        fade = 1.0 - t * fade_amount
+                        new_val = orig_val * max(0.0, fade)
+
+                    elif mode == 2:  # Repeat + Pitch Down
+                        # Read from progressively further into the slice
+                        stretch = 1.0 + t * fade_amount
+                        read_pos = int(i * stretch)
+                        if read_pos < len(original[ch]):
+                            new_val = original[ch][read_pos]
+                        else:
+                            new_val = 0.0
+
+                    elif mode == 3:  # Reverse Alternate
+                        if rep % 2 == 1:
+                            rev_i = current_slice_len - 1 - i
+                            new_val = original[ch][rev_i] if rev_i < len(original[ch]) else 0.0
+                        else:
+                            new_val = orig_val
+
+                    elif mode == 4:  # Glitch (random rearrange)
+                        rng = (rng * 1103515245 + 12345) & 0x7FFFFFFF
+                        rand_i = (rng >> 8) % current_slice_len
+                        new_val = original[ch][rand_i] if rand_i < len(original[ch]) else 0.0
+
+                    elif mode == 5:  # Tape Stop
+                        # Progressively slow down
+                        slow = 1.0 + t * fade_amount * 3.0
+                        read_pos = int(i / slow)
+                        if read_pos < len(original[ch]):
+                            new_val = original[ch][read_pos] * (1.0 - t * 0.5)
+                        else:
+                            new_val = 0.0
+
+                    else:
+                        new_val = orig_val
+
+                    # Dry/wet mix
+                    dry_val = sample.GetSampleAt(out_pos, ch) if out_pos < length else 0.0
+                    mixed = dry_val * (1.0 - dry_wet) + new_val * dry_wet
+                    sample.SetSampleAt(out_pos, ch, mixed)
+
+        # Move write position past the repeated section
+        write_pos += current_slice_len * repeats
+
+        if (write_pos - sel_start) % 5000 == 0:
+            Utils.ProgressMsg('Stutter Edit...', write_pos - sel_start, total)
