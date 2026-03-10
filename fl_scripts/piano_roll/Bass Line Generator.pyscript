@@ -1,0 +1,818 @@
+"""Bass Line Generator Pro - Create bass lines from existing chords or melodies.
+
+Reads the notes in the piano roll, detects chord groups using adjustable
+time windowing, infers the harmonic root via template-scoring (handles
+inversions correctly), and generates a bass line in the selected style.
+
+Non-destructive workflow: generated notes are marked with a signature
+color and group ID for idempotent regeneration under Preview mode.
+Never deletes unselected notes outside the visible scope.
+
+Enhanced with register voice-leading, time signature awareness,
+diatonic approach notes via scale highlighting, and Control Surface
+GUI support.
+"""
+
+import flpianoroll as flp
+import math
+
+
+# ---------------------------------------------------------------------------
+# Bass style and option definitions
+# ---------------------------------------------------------------------------
+BASS_STYLES = [
+    'Whole Notes (sustained)',
+    'Half Notes',
+    'Quarter Notes',
+    'Eighth Notes (driving)',
+    'Octave Bounce (up)',
+    'Octave Bounce (down)',
+    'Root-Fifth',
+    'Root-Fifth-Octave',
+    'Walking Bass (jazz)',
+    'Syncopated (funk)',
+    'Arpeggiated',
+]
+
+# FL Studio labels middle C (MIDI 60) as C5.
+# Therefore: C0 = MIDI 0, C1 = 12, C2 = 24, C3 = 36
+OCTAVE_OPTIONS = [
+    'C0 (sub bass)',
+    'C1 (deep bass)',
+    'C2 (standard bass)',
+    'C3 (upper bass)',
+]
+OCTAVE_BASE = [0, 12, 24, 36]
+
+BASS_FOLLOWS_MODES = [
+    'Chord Root (harmonic)',
+    'Bass Note (lowest)',
+    'Hybrid (prefer root)',
+]
+
+CHORD_WINDOW_OPTIONS = [
+    '1/32 note',
+    '1/16 note',
+    '1/8 note (default)',
+    '1/4 note',
+    '1/2 note',
+]
+# Multipliers of PPQ for chord grouping tolerance
+CHORD_WINDOW_MULTS = [0.125, 0.25, 0.5, 1.0, 2.0]
+
+APPROACH_MODES = [
+    'Off',
+    'Chromatic (half step)',
+    'Diatonic (scale-aware)',
+    'Enclosure (above+below)',
+]
+
+# Signature color for generated bass notes (used for idempotent regeneration)
+BASS_NOTE_COLOR = 15
+
+
+# ---------------------------------------------------------------------------
+# LCG random & Box-Muller Gaussian
+# ---------------------------------------------------------------------------
+_rng_state = 31337
+
+
+def _rand():
+    """Return uniform random float in [0, 1)."""
+    global _rng_state
+    _rng_state = (_rng_state * 1103515245 + 12345) & 0x7FFFFFFF
+    return _rng_state / 0x7FFFFFFF
+
+
+def _seed(val):
+    global _rng_state
+    _rng_state = max(1, int(val) & 0x7FFFFFFF)
+
+
+def _gauss(mu, sigma):
+    """Box-Muller transform for Gaussian random."""
+    u1 = max(1e-10, _rand())
+    u2 = _rand()
+    z = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+    return mu + sigma * z
+
+
+# ---------------------------------------------------------------------------
+# Time signature helpers
+# ---------------------------------------------------------------------------
+def _get_time_sig():
+    """Get time signature from FL Studio. Falls back to 4/4."""
+    try:
+        num = flp.score.tsnum
+        den = flp.score.tsden
+        if num > 0 and den > 0:
+            return (num, den)
+    except Exception:
+        pass
+    return (4, 4)
+
+
+def _bar_ticks(ppq, ts_num, ts_den):
+    """Calculate one bar length in ticks."""
+    bar_quarters = ts_num * (4.0 / ts_den)
+    return int(bar_quarters * ppq)
+
+
+# ---------------------------------------------------------------------------
+# Scale helper — parse snap_scale_helper bitmask
+# ---------------------------------------------------------------------------
+def _parse_scale_bitmask():
+    """Parse the C-aligned scale bitmask from the piano roll.
+
+    Returns a list of 12 ints where 0 = in scale, 1 = out of scale.
+    Returns None if no scale is set.
+    """
+    try:
+        helper = flp.score.snap_scale_helper
+        if not helper or helper.strip() == '':
+            return None
+        bits = [int(x.strip()) for x in helper.split(',')]
+        if len(bits) != 12:
+            return None
+        if 1 not in bits:
+            return None
+        return bits
+    except Exception:
+        return None
+
+
+def _nearest_scale_pitch(pitch, scale_bits, direction):
+    """Find nearest in-scale pitch in the given direction.
+
+    direction: 1 = down, 2 = up
+    """
+    if scale_bits is None:
+        return pitch
+    for offset in range(1, 12):
+        if direction == 1:  # down
+            p = pitch - offset
+        else:  # up
+            p = pitch + offset
+        if 0 <= p <= 127 and scale_bits[p % 12] == 0:
+            return p
+    return pitch
+
+
+def _is_in_scale(pitch, scale_bits):
+    """Check if pitch is in the current scale."""
+    if scale_bits is None:
+        return True
+    return scale_bits[pitch % 12] == 0
+
+
+# ---------------------------------------------------------------------------
+# Template-scoring chord root detection
+# ---------------------------------------------------------------------------
+# Chord templates: intervals from root that define each quality
+_CHORD_TEMPLATES = [
+    # (name, required_intervals, optional_intervals, weight)
+    ('maj',     {0, 4, 7},      {11, 14},  1.0),
+    ('min',     {0, 3, 7},      {10, 14},  1.0),
+    ('dom7',    {0, 4, 7, 10},  {14},      1.1),
+    ('min7',    {0, 3, 7, 10},  {14},      1.1),
+    ('maj7',    {0, 4, 7, 11},  {14},      1.1),
+    ('dim',     {0, 3, 6},      {9},       0.9),
+    ('aug',     {0, 4, 8},      set(),     0.9),
+    ('sus2',    {0, 2, 7},      set(),     0.85),
+    ('sus4',    {0, 5, 7},      set(),     0.85),
+    ('dim7',    {0, 3, 6, 9},   set(),     1.0),
+    ('hdim7',   {0, 3, 6, 10},  set(),     1.0),
+    ('min6',    {0, 3, 7, 9},   set(),     0.95),
+    ('maj6',    {0, 4, 7, 9},   set(),     0.95),
+    ('minmaj7', {0, 3, 7, 11},  set(),     1.0),
+]
+
+
+def _detect_root(group, bass_follows):
+    """Detect the harmonic root of a chord group using template scoring.
+
+    Returns (root_pc, bass_pc, chord_quality_intervals).
+    bass_follows: 0 = Chord Root, 1 = Bass Note, 2 = Hybrid
+    """
+    if not group:
+        return (0, 0, {0, 4, 7})
+
+    # Sort by pitch
+    sorted_g = sorted(group, key=lambda n: n.number)
+    bass_pc = sorted_g[0].number % 12
+
+    # Build pitch class set
+    pc_set = set()
+    for n in group:
+        pc_set.add(n.number % 12)
+
+    if len(pc_set) == 1:
+        # Single note — root is that note
+        pc = list(pc_set)[0]
+        return (pc, bass_pc, {0})
+
+    # Score each candidate root against templates
+    best_root = bass_pc
+    best_score = -1
+    best_intervals = {0, 4, 7}
+
+    for candidate_root in pc_set:
+        # Compute interval set relative to candidate root
+        intervals = set()
+        for pc in pc_set:
+            intervals.add((pc - candidate_root) % 12)
+
+        # Score against each template
+        for tname, required, optional, weight in _CHORD_TEMPLATES:
+            # Count matching required intervals
+            matched = len(required & intervals)
+            total_required = len(required)
+
+            if matched < 2:
+                continue  # Need at least root + one defining tone
+
+            # Score: proportion of required matched, bonus for optional
+            score = (matched / total_required) * weight
+
+            # Bonus for optional intervals present
+            opt_matched = len(optional & intervals)
+            if optional:
+                score += opt_matched * 0.1
+
+            # Small bonus if candidate root is also the bass note
+            if candidate_root == bass_pc:
+                score += 0.15
+
+            # Penalize if defining 3rd is missing (ambiguous quality)
+            if 3 not in intervals and 4 not in intervals:
+                score -= 0.1
+
+            if score > best_score:
+                best_score = score
+                best_root = candidate_root
+                best_intervals = intervals
+
+    # Determine which pitch class to use for bass
+    if bass_follows == 0:
+        # Chord Root (harmonic)
+        return (best_root, best_root, best_intervals)
+    elif bass_follows == 1:
+        # Bass Note (lowest)
+        return (best_root, bass_pc, best_intervals)
+    else:
+        # Hybrid: prefer root, but use bass note if it's a strong inversion
+        # (bass note is a chord tone but not the root)
+        bass_interval = (bass_pc - best_root) % 12
+        if bass_interval in {3, 4, 7}:
+            # Bass note is a chord tone — respect the inversion
+            return (best_root, bass_pc, best_intervals)
+        return (best_root, best_root, best_intervals)
+
+
+# ---------------------------------------------------------------------------
+# Register voice-leading — minimize jumps between bass notes
+# ---------------------------------------------------------------------------
+def _voice_lead_pitch(target_pc, octave_base, prev_pitch, allow_range=12):
+    """Find the octave placement of target_pc closest to prev_pitch.
+
+    Stays within octave_base ± allow_range, preferring minimal movement.
+    """
+    if prev_pitch is None:
+        # First note: use the user's selected octave
+        return octave_base + target_pc
+
+    # Generate all valid placements of this pitch class
+    candidates = []
+    low = max(0, octave_base - allow_range)
+    high = min(127, octave_base + 12 + allow_range)
+
+    p = target_pc
+    while p < low:
+        p += 12
+    while p <= high:
+        candidates.append(p)
+        p += 12
+
+    if not candidates:
+        return octave_base + target_pc
+
+    # Choose closest to previous pitch, with slight penalty for jumps > 7
+    best = candidates[0]
+    best_cost = abs(candidates[0] - prev_pitch)
+    for c in candidates[1:]:
+        cost = abs(c - prev_pitch)
+        if cost > 7:
+            cost += 2  # Penalize large jumps
+        if cost < best_cost:
+            best_cost = cost
+            best = c
+
+    return best
+
+
+# ---------------------------------------------------------------------------
+# Default note creation using FL's default properties when available
+# ---------------------------------------------------------------------------
+def _make_bass_note(pitch, time, length, velocity):
+    """Create a bass note using FL's default note properties if available."""
+    try:
+        n = flp.score.getDefaultNoteProperties()
+    except Exception:
+        n = flp.Note()
+        n.pan = 0.5
+        n.fcut = 0.5
+        n.fres = 0.5
+    n.number = max(0, min(127, pitch))
+    n.time = max(0, time)
+    n.length = max(1, length)
+    n.velocity = max(0.01, min(1.0, velocity))
+    n.color = BASS_NOTE_COLOR
+    return n
+
+
+# ---------------------------------------------------------------------------
+# Idempotent regeneration — remove previously generated bass notes
+# ---------------------------------------------------------------------------
+def _remove_generated_notes():
+    """Remove notes with the bass signature color from the visible scope.
+
+    Returns list of remaining (non-generated) notes.
+    """
+    remaining = []
+    for i in range(flp.score.noteCount):
+        note = flp.score.getNote(i)
+        if note.color != BASS_NOTE_COLOR:
+            remaining.append(note)
+    return remaining
+
+
+# ---------------------------------------------------------------------------
+# Control Surface .fst support
+# ---------------------------------------------------------------------------
+_FST_FILE = 'Bass Line Generator.fst'
+
+
+def _try_load_surface():
+    """Attempt to load the Control Surface .fst GUI."""
+    try:
+        form = flp.LoadSurface(_FST_FILE)
+        if form is not None:
+            return form
+    except Exception:
+        pass
+    return None
+
+
+def _build_standard_dialog():
+    """Build the standard ScriptDialog fallback UI."""
+    form = flp.ScriptDialog(
+        'Bass Line Generator Pro',
+        'Generates a bass line from your existing chords or melody.\r\n\r\n'
+        'How it works: The script detects chord groups and identifies the\r\n'
+        'harmonic root using template matching (handles inversions correctly).\r\n\r\n'
+        'BASS FOLLOWS controls whether the bass plays the harmonic root,\r\n'
+        'the lowest note (for slash chords), or a smart hybrid.\r\n\r\n'
+        'VOICE LEADING minimizes jumps between chord roots for smooth lines.\r\n'
+        'APPROACH modes: Chromatic, Diatonic (uses scale highlighting),\r\n'
+        'or Enclosure (jazz above+below approach).\r\n\r\n'
+        'Generated notes use color 15 for easy identification and\r\n'
+        'idempotent regeneration (safe with Preview mode).\r\n\r\n'
+        'NOTE: This script adds notes non-destructively. It will not\r\n'
+        'delete your existing notes (only previously generated bass notes\r\n'
+        'marked with color 15 are replaced on re-run).'
+    )
+    form.AddInputCombo('Bass Style', BASS_STYLES, 2)
+    form.AddInputCombo('Octave', OCTAVE_OPTIONS, 2)
+    form.AddInputCombo('Bass Follows', BASS_FOLLOWS_MODES, 0)
+    form.AddInputCombo('Approach', APPROACH_MODES, 0)
+    form.AddInputCombo('Chord Window', CHORD_WINDOW_OPTIONS, 2)
+    form.AddInputKnob('Velocity', 0.78, 0.10, 1.00)
+    form.AddInputKnob('Note Length (%)', 0.85, 0.10, 1.00)
+    form.AddInputKnob('Swing', 0.00, 0.00, 0.50)
+    form.AddInputCheckbox('Voice Leading', True)
+    form.AddInputCheckbox('Keep Original Notes', True)
+    return form
+
+
+def createDialog():
+    """Try Control Surface first, fall back to ScriptDialog."""
+    form = _try_load_surface()
+    if form is not None:
+        return form
+    return _build_standard_dialog()
+
+
+# ---------------------------------------------------------------------------
+# Apply — non-destructive, idempotent, single commit
+# ---------------------------------------------------------------------------
+def apply(form):
+    style = int(form.GetInputValue('Bass Style'))
+    octave_idx = int(form.GetInputValue('Octave'))
+    bass_follows = int(form.GetInputValue('Bass Follows'))
+    approach_mode = int(form.GetInputValue('Approach'))
+    chord_window_idx = int(form.GetInputValue('Chord Window'))
+    velocity = form.GetInputValue('Velocity')
+    note_len_pct = form.GetInputValue('Note Length (%)')
+    swing = form.GetInputValue('Swing')
+    voice_leading = bool(form.GetInputValue('Voice Leading'))
+    keep_original = bool(form.GetInputValue('Keep Original Notes'))
+
+    ppq = flp.score.PPQ
+    octave_base = OCTAVE_BASE[octave_idx]
+    chord_tolerance = int(CHORD_WINDOW_MULTS[chord_window_idx] * ppq)
+
+    # Time signature awareness
+    ts_num, ts_den = _get_time_sig()
+    bar_len = _bar_ticks(ppq, ts_num, ts_den)
+    slots_per_bar = max(1, int(bar_len / (ppq // 4)))  # 16th note slots per bar
+
+    # Scale bitmask for diatonic approach notes
+    scale_bits = _parse_scale_bitmask() if approach_mode >= 2 else None
+
+    # Step 1: Remove previously generated bass notes (idempotent)
+    remaining_notes = _remove_generated_notes()
+
+    # Step 2: Identify source notes (non-generated notes in the visible scope)
+    source_notes = []
+    for note in remaining_notes:
+        source_notes.append(note)
+
+    if not source_notes:
+        return
+
+    _seed(sum(n.time * 3 + n.number * 7 for n in source_notes))
+
+    # Step 3: Group notes into chords by time proximity
+    sorted_notes = sorted(source_notes, key=lambda n: (n.time, n.number))
+    chord_groups = []
+    current_group = [sorted_notes[0]]
+
+    for n in sorted_notes[1:]:
+        if abs(n.time - current_group[0].time) <= chord_tolerance:
+            current_group.append(n)
+        else:
+            chord_groups.append(sorted(current_group, key=lambda x: x.number))
+            current_group = [n]
+    chord_groups.append(sorted(current_group, key=lambda x: x.number))
+
+    # Step 4: Analyze each chord group
+    chords = []
+    for g_idx, group in enumerate(chord_groups):
+        start_time = group[0].time
+
+        # End time = start of next chord, or end of current notes
+        if g_idx + 1 < len(chord_groups):
+            end_time = chord_groups[g_idx + 1][0].time
+        else:
+            end_time = max(n.time + n.length for n in group)
+
+        # Template-scoring root detection
+        root_pc, bass_pc, intervals = _detect_root(group, bass_follows)
+
+        # Build chord tones relative to root for walking/arpeggio use
+        chord_tones_intervals = sorted(list(intervals))
+
+        chords.append({
+            'root_pc': root_pc,
+            'bass_pc': bass_pc,
+            'intervals': intervals,
+            'chord_tones_iv': chord_tones_intervals,
+            'start': start_time,
+            'end': end_time,
+            'duration': end_time - start_time,
+            'is_minor': 3 in intervals,
+            'has_fifth': 7 in intervals,
+            'has_dim5': 6 in intervals,
+        })
+
+    # Step 5: Generate bass notes with voice-leading
+    bass_notes = []
+    prev_pitch = None  # For voice-leading
+
+    step_whole = ppq * 4
+    step_half = ppq * 2
+    step_quarter = ppq
+    step_eighth = ppq // 2
+    step_16th = ppq // 4
+
+    # Assign a group index for generated bass notes
+    try:
+        bass_group = flp.score.getNextFreeGroupIndex()
+    except Exception:
+        bass_group = 99
+
+    for c_idx, chord in enumerate(chords):
+        # Resolve bass pitch with voice-leading
+        bass_pc = chord['bass_pc']
+        if voice_leading and prev_pitch is not None:
+            root_midi = _voice_lead_pitch(bass_pc, octave_base, prev_pitch)
+        else:
+            root_midi = octave_base + bass_pc
+
+        # Clamp to valid range
+        root_midi = max(0, min(127, root_midi))
+
+        # Build chord tones in MIDI (relative to root_midi)
+        root_pc = chord['root_pc']
+        tones = []
+        for iv in chord['chord_tones_iv']:
+            tone_midi = root_midi + iv
+            if 0 <= tone_midi <= 127:
+                tones.append(tone_midi)
+        if not tones:
+            tones = [root_midi]
+
+        # Fifth and octave
+        fifth_iv = 7 if chord['has_fifth'] else (6 if chord['has_dim5'] else 7)
+        fifth = max(0, min(127, root_midi + fifth_iv))
+        octave_up = min(127, root_midi + 12)
+        octave_down = max(0, root_midi - 12)
+
+        start = chord['start']
+        end = chord['end']
+        duration = chord['duration']
+
+        # Next chord root for approach notes
+        if c_idx + 1 < len(chords):
+            next_bass_pc = chords[c_idx + 1]['bass_pc']
+            if voice_leading:
+                next_root = _voice_lead_pitch(next_bass_pc, octave_base, root_midi)
+            else:
+                next_root = octave_base + next_bass_pc
+        else:
+            next_root = root_midi
+
+        def _add(pitch, time, length, vel):
+            """Add a bass note with signature and group."""
+            # Clamp swing time to chord boundary
+            clamped_time = min(time, end - max(1, length))
+            clamped_time = max(0, clamped_time)
+            n = _make_bass_note(pitch, clamped_time, length, vel)
+            n.group = bass_group
+            bass_notes.append(n)
+
+        def _swing_time(t, beat):
+            """Apply swing to off-beats, clamped to chord boundary."""
+            if beat % 2 == 1 and swing > 0:
+                return min(t + int(step_eighth * swing), end - step_16th)
+            return t
+
+        # --- Style-specific generation ---
+
+        if style == 0:    # Whole Notes
+            length = int(min(duration, step_whole) * note_len_pct)
+            _add(root_midi, start, length, velocity)
+
+        elif style == 1:  # Half Notes
+            t = start
+            beat = 0
+            while t < end - step_quarter:
+                length = int(step_half * note_len_pct)
+                length = min(length, end - t)
+                _add(root_midi, t, length, velocity)
+                t += step_half
+                beat += 1
+
+        elif style == 2:  # Quarter Notes
+            t = start
+            beat = 0
+            while t < end - step_eighth:
+                length = int(step_quarter * note_len_pct)
+                length = min(length, end - t)
+                vel = velocity if beat % ts_num == 0 else velocity * 0.9
+                t_s = _swing_time(t, beat)
+                _add(root_midi, t_s, length, vel)
+                t += step_quarter
+                beat += 1
+
+        elif style == 3:  # Eighth Notes (driving)
+            t = start
+            beat = 0
+            while t < end - step_16th:
+                length = int(step_eighth * note_len_pct)
+                length = min(length, end - t)
+                vel = velocity if beat % 2 == 0 else velocity * 0.85
+                t_s = _swing_time(t, beat)
+                _add(root_midi, t_s, length, vel)
+                t += step_eighth
+                beat += 1
+
+        elif style == 4:  # Octave Bounce (up)
+            t = start
+            beat = 0
+            while t < end - step_16th:
+                length = int(step_eighth * note_len_pct)
+                length = min(length, end - t)
+                pitch = root_midi if beat % 2 == 0 else octave_up
+                vel = velocity if beat % 2 == 0 else velocity * 0.88
+                t_s = _swing_time(t, beat)
+                _add(pitch, t_s, length, vel)
+                t += step_eighth
+                beat += 1
+
+        elif style == 5:  # Octave Bounce (down)
+            t = start
+            beat = 0
+            while t < end - step_16th:
+                length = int(step_eighth * note_len_pct)
+                length = min(length, end - t)
+                pitch = root_midi if beat % 2 == 0 else octave_down
+                vel = velocity if beat % 2 == 0 else velocity * 0.88
+                t_s = _swing_time(t, beat)
+                _add(pitch, t_s, length, vel)
+                t += step_eighth
+                beat += 1
+
+        elif style == 6:  # Root-Fifth
+            t = start
+            beat = 0
+            while t < end - step_16th:
+                length = int(step_quarter * note_len_pct)
+                length = min(length, end - t)
+                pitch = root_midi if beat % 2 == 0 else fifth
+                vel = velocity if beat % 2 == 0 else velocity * 0.90
+                t_s = _swing_time(t, beat)
+                _add(pitch, t_s, length, vel)
+                t += step_quarter
+                beat += 1
+
+        elif style == 7:  # Root-Fifth-Octave
+            pattern = [root_midi, fifth, octave_up, fifth]
+            t = start
+            beat = 0
+            while t < end - step_16th:
+                length = int(step_quarter * note_len_pct)
+                length = min(length, end - t)
+                pitch = pattern[beat % 4]
+                vel = velocity if beat % 4 == 0 else velocity * 0.88
+                t_s = _swing_time(t, beat)
+                _add(pitch, t_s, length, vel)
+                t += step_quarter
+                beat += 1
+
+        elif style == 8:  # Walking Bass
+            # Generate one walk per bar within the chord duration
+            # Each walk: beat-1 = root, inner beats = chord/passing tones,
+            # last beat = approach to next chord
+            beats_per_bar = ts_num
+            bar_t = start
+
+            while bar_t < end - step_eighth:
+                steps_in_bar = min(beats_per_bar,
+                                   max(1, (end - bar_t) // step_quarter))
+
+                for step in range(steps_in_bar):
+                    t = bar_t + step * step_quarter
+                    if t >= end - step_16th:
+                        break
+
+                    length = int(step_quarter * note_len_pct)
+                    length = min(length, end - t)
+
+                    if step == 0:
+                        # Beat 1: always the root
+                        pitch = root_midi
+                    elif step == steps_in_bar - 1 and steps_in_bar > 1 and c_idx + 1 < len(chords):
+                        # Last beat of bar: approach next root
+                        if _rand() > 0.5:
+                            pitch = next_root - 1
+                        else:
+                            pitch = next_root + 1
+                    elif step == 1 and len(tones) > 1:
+                        # Beat 2: chord tone (3rd or 5th)
+                        pitch = tones[1 % len(tones)]
+                    else:
+                        # Other beats: passing tone or random chord tone
+                        if len(tones) > 2:
+                            idx = int(_rand() * len(tones)) % len(tones)
+                            pitch = tones[idx]
+                        else:
+                            # Scalar passing tones
+                            passing = [root_midi + 2, root_midi + 4,
+                                       root_midi + 5, root_midi + 7]
+                            idx = int(_rand() * len(passing)) % len(passing)
+                            pitch = passing[idx]
+
+                    pitch = max(0, min(127, pitch))
+                    vel = velocity if step == 0 else velocity * (0.85 + _rand() * 0.10)
+                    t_s = _swing_time(t, step)
+                    _add(pitch, t_s, length, vel)
+
+                bar_t += bar_len
+
+        elif style == 9:  # Syncopated (funk)
+            # Adapt slot grid to time signature
+            # Pattern hits relative to 16th-note slots within a bar
+            if slots_per_bar >= 16:
+                # 4/4 or larger: classic funk pattern
+                pattern_slots = {0, 3, 4, 6, 8, 11, 12, 14}
+                accent_slots = {0, 4, 8, 12}
+            elif slots_per_bar >= 12:
+                # 3/4 or 6/8: adapted pattern
+                pattern_slots = {0, 2, 4, 6, 8, 10}
+                accent_slots = {0, 4, 8}
+            else:
+                # Fallback: hit every other slot
+                pattern_slots = set(range(0, slots_per_bar, 2))
+                accent_slots = {0}
+
+            slot = 0
+            t = start
+            while t < end - step_16th // 2:
+                slot_in_bar = slot % slots_per_bar
+                if slot_in_bar in pattern_slots:
+                    length = int(step_16th * 1.5 * note_len_pct)
+                    length = min(length, end - t)
+                    vel = velocity if slot_in_bar in accent_slots else velocity * 0.82
+                    pitch = root_midi
+                    r = _rand()
+                    if slot_in_bar == 6 and r > 0.5:
+                        pitch = fifth
+                    elif slot_in_bar == 14 and r > 0.5:
+                        pitch = octave_down
+
+                    _add(pitch, t, length, vel)
+
+                t += step_16th
+                slot += 1
+
+        elif style == 10:  # Arpeggiated
+            t = start
+            tone_idx = 0
+            while t < end - step_16th:
+                length = int(step_eighth * note_len_pct)
+                length = min(length, end - t)
+                pitch = tones[tone_idx % len(tones)]
+                vel = velocity if tone_idx % len(tones) == 0 else velocity * 0.88
+                t_s = _swing_time(t, tone_idx)
+                _add(pitch, t_s, length, vel)
+                t += step_eighth
+                tone_idx += 1
+
+        # --- Approach note to next chord ---
+        if approach_mode > 0 and c_idx + 1 < len(chords) and style != 8:
+            approach_time = end - step_16th
+            if approach_time > start and approach_time < end:
+                approach_len = int(step_16th * note_len_pct)
+
+                if approach_mode == 1:
+                    # Chromatic: half step below
+                    approach_pitch = next_root - 1
+
+                elif approach_mode == 2:
+                    # Diatonic: nearest in-scale note below next root
+                    if scale_bits is not None:
+                        approach_pitch = _nearest_scale_pitch(
+                            next_root - 1, scale_bits, 1)
+                    else:
+                        approach_pitch = next_root - 1
+
+                elif approach_mode == 3:
+                    # Enclosure: two 16th notes — above then below
+                    # First: above
+                    enc_time_1 = end - step_16th * 2
+                    enc_time_2 = end - step_16th
+                    if enc_time_1 > start:
+                        above = next_root + 1
+                        below = next_root - 1
+                        if scale_bits is not None:
+                            above = _nearest_scale_pitch(
+                                next_root + 1, scale_bits, 2)
+                            below = _nearest_scale_pitch(
+                                next_root - 1, scale_bits, 1)
+                        enc_len = int(step_16th * note_len_pct)
+                        _add(max(0, min(127, above)), enc_time_1,
+                             enc_len, velocity * 0.70)
+                        _add(max(0, min(127, below)), enc_time_2,
+                             enc_len, velocity * 0.75)
+                        approach_pitch = None  # Already handled
+                    else:
+                        approach_pitch = next_root - 1
+                else:
+                    approach_pitch = next_root - 1
+
+                if approach_mode != 3 or (approach_mode == 3 and approach_pitch is not None):
+                    if approach_pitch is not None:
+                        approach_pitch = max(0, min(127, approach_pitch))
+                        _add(approach_pitch, approach_time,
+                             approach_len, velocity * 0.75)
+
+        # Update voice-leading tracker
+        prev_pitch = root_midi
+
+    # Step 6: Commit — non-destructive
+    # Rebuild: remaining (non-generated) notes + originals if kept + new bass
+    output_notes = []
+
+    if keep_original:
+        output_notes.extend(remaining_notes)
+    else:
+        # Still keep non-source notes (notes outside visible scope are safe
+        # because the API only shows visible notes)
+        output_notes.extend(remaining_notes)
+
+    output_notes.extend(bass_notes)
+
+    flp.score.clearNotes(True)
+    for note in output_notes:
+        flp.score.addNote(note)

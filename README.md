@@ -5,14 +5,14 @@ Comprehensive Python toolkit for FL Studio production workflows — MIDI tools, 
 ## Modules
 
 | Module | Description |
-|--------|-------------|
+| -------- | ------------- |
 | **midi_tools** | Scale library (100+ scales), chord engine, arpeggiator, drum patterns, MIDI analysis & transformation |
 | **audio_tools** | BPM detection, key detection, sample slicing, batch processing, spectrum analysis, format conversion |
 | **mixing** | Effects chain (compressor, limiter, EQ, saturation, de-esser), channel strip, gain staging, stereo tools, mix analysis |
 | **workflow** | FLP project file parsing, preset management, project backup, render queue, sample organization |
 | **release** | Track metadata (ID3), album management, synced lyrics, licensing/splits, export pipeline |
 | **dsp** | C++ DSP engine with pybind11 bindings — reverb, chorus, delay, phaser, biquad/Butterworth filters |
-| **fl_scripts** | 10 ready-to-use FL Studio scripts (6 piano roll + 4 Edison) |
+| **fl_scripts** | 19 ready-to-use FL Studio scripts (13 piano roll + 6 Edison) |
 
 ## Installation
 
@@ -79,7 +79,7 @@ pytest --cov=midi_tools --cov=audio_tools --cov=mixing --cov=workflow --cov=rele
 
 ## Project Structure
 
-```
+```bash
 fl-studio/
 ├── audio_tools/     # Audio processing & analysis
 ├── midi_tools/      # MIDI manipulation & generation

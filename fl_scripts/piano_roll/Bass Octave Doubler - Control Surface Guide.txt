@@ -1,0 +1,193 @@
+===========================================================================
+  BASS OCTAVE DOUBLER PRO — Control Surface (.fst) Build Guide
+===========================================================================
+
+  This guide tells you exactly how to build the custom GUI in FL Studio's
+  Control Surface plugin. When done, the script auto-detects and uses it.
+  If the .fst file is missing, the script falls back to the standard dialog.
+
+  REQUIREMENTS: FL Studio 24.1.0 or later (LoadSurface API)
+
+===========================================================================
+  STEP 1: CREATE THE CONTROL SURFACE PRESET
+===========================================================================
+
+  1. Open FL Studio
+  2. Add a new "Control Surface" plugin instance (Add > More Plugins)
+  3. Right-click the Control Surface title bar > choose a dark background
+  4. Build the layout described below using drag-and-drop controls
+  5. When done: Presets menu > "Save preset as..." >
+     Save as: "Bass Octave Doubler.fst"
+  6. Copy the .fst file to your piano roll scripts folder:
+     Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  The script looks for a file named exactly: "Bass Octave Doubler.fst"
+
+===========================================================================
+  STEP 2: LAYOUT — THREE ZONES
+===========================================================================
+
+  +---------------------+---------------------+------------------+
+  |  ZONE 1: LAYERING   |  ZONE 2: ACOUSTIC   |  ZONE 3: SCALE  |
+  |  & MODE             |  & ROUTING           |  & OPTIONS      |
+  +---------------------+---------------------+------------------+
+
+---------------------------------------------------------------------------
+  ZONE 1: LAYERING & MODE (left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)        | Range / Options        | Default
+  ------------------|---------------------|------------------------|--------
+  Knob (integer)  | Mode                | 0-7 (8 doubler modes)  | 0
+  Knob (integer) | Custom Interval     | -36 to 36              | -12
+  Knob| Velocity Scale      | 0.10 to 1.00           | 0.80
+  Knob| Length Scale         | 0.25 to 2.00           | 1.00
+
+  MODE VALUES:
+    0 = Octave Down (-12)
+    1 = Octave Up (+12)
+    2 = Sub Bass (-24)
+    3 = Double (up + down)
+    4 = Fifth Below (-7)
+    5 = Fifth Above (+7)
+    6 = Power Stack (oct down + fifth)
+    7 = Custom Interval
+
+---------------------------------------------------------------------------
+  ZONE 2: ACOUSTIC & ROUTING (center panel) — THE STAR FEATURE
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)           | Range          | Default
+  ------------------|------------------------|----------------|--------
+  Knob| Sub Filter Cutoff      | 0.05 to 0.80  | 0.30
+  Knob (integer) | Timing Offset (ticks)  | -20 to 20     | 0
+  Knob| Humanize               | 0.00 to 0.10  | 0.00
+  Knob (integer)  | Layer Color            | 0-15 (16 opts) | 0
+  CheckBox     | Mono Sub               | 0 or 1         | 1 (on)
+
+  SUB FILTER CUTOFF:
+  - Controls the darkness of sub-bass layers (fcut attenuation)
+  - 0.05 = very dark sub (pure sine territory)
+  - 0.80 = brighter sub (more harmonics pass through)
+  - Only affects notes generated at lower octaves
+
+  TIMING OFFSET:
+  - Shifts generated notes by N ticks to prevent comb filtering
+  - Negative = sub hits BEFORE source (pre-transient weight)
+  - Positive = sub hits AFTER source (transient-first punch)
+  - Typical: +3 to +8 ticks for sub after mid-bass
+
+  HUMANIZE:
+  - Gaussian velocity jitter (sigma)
+  - 0.00 = perfectly uniform velocity scaling
+  - 0.10 = noticeable natural variation
+
+  LAYER COLOR VALUES:
+    0 = Same as Source (no routing change)
+    1-15 = Color 1 through Color 15
+
+  TIP: Use Layer Color to route sub-bass to a separate synth channel.
+  E.g., Color 1 = mid-bass (wavetable), Color 2 = sub (pure sine).
+
+---------------------------------------------------------------------------
+  ZONE 3: SCALE & OPTIONS (right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)           | Range / Options | Default
+  ------------------|------------------------|-----------------|--------
+  Knob (integer)  | Snap to Scale          | 0-3 (4 modes)   | 0
+  Knob (integer) | Low Limit (MIDI)       | 0 to 60         | 24
+  Knob (integer) | High Limit (MIDI)      | 60 to 127       | 96
+  CheckBox     | Keep Original Notes    | 0 or 1          | 1 (on)
+  CheckBox     | Selected Notes Only    | 0 or 1          | 1 (on)
+
+  SNAP TO SCALE VALUES:
+    0 = Off (chromatic — raw interval math)
+    1 = Nearest (snap to closest in-scale note)
+    2 = Up (snap to next higher in-scale note)
+    3 = Down (snap to next lower in-scale note)
+
+  IMPORTANT: Scale snapping only affects non-octave intervals (fifths,
+  custom intervals). Octave doublings (±12, ±24) are always chromatic
+  since they share the same pitch class as the source.
+
+===========================================================================
+  STEP 3: CONTROL NAMING — CRITICAL
+===========================================================================
+
+  Control names MUST match EXACTLY (case-sensitive, including spaces):
+
+    "Mode"
+    "Custom Interval"
+    "Velocity Scale"
+    "Length Scale"
+    "Sub Filter Cutoff"
+    "Timing Offset (ticks)"
+    "Humanize"
+    "Layer Color"
+    "Mono Sub"
+    "Snap to Scale"
+    "Low Limit (MIDI)"
+    "High Limit (MIDI)"
+    "Keep Original Notes"
+    "Selected Notes Only"
+
+===========================================================================
+  STEP 4: VISUAL DESIGN SUGGESTIONS
+===========================================================================
+
+  BACKGROUND:  Dark gray or black (#1a1a1a)
+  LABELS:       "LAYERING"    "ACOUSTIC"    "SCALE & OPTIONS"
+  TOTAL SIZE:   ~600 x 300 pixels
+
+  COLOR CODING (optional):
+  - Layering knobs:    Blue accent
+  - Acoustic knobs:    Orange/amber accent (mixing theme)
+  - Scale/Options:     Green accent
+
+===========================================================================
+  STEP 5: TESTING
+===========================================================================
+
+  PHASE COHERENCE TEST:
+  - Draw 4 quarter notes on C2
+  - Run with Octave Down, Timing Offset = 0
+  - Then run again with Timing Offset = 5
+  - The offset version should sound punchier (less comb filtering)
+
+  SCALE SNAP TEST:
+  - Set scale to C Natural Minor in Helpers > Scale highlighting
+  - Draw a D note, run Fifth Above (+7)
+  - With Snap OFF: generates A (out of scale!)
+  - With Snap ON: generates Ab/G# (in scale — diminished fifth)
+
+  COLLISION TEST:
+  - Draw C3 and C4 notes
+  - Run Octave Up mode — C3 generates C4
+  - C4 already exists, so the duplicate is skipped (no overlap)
+
+  ROUTING TEST:
+  - Set Layer Color to "Color 2"
+  - Run Octave Down
+  - Generated sub notes appear with Color 2
+  - Route Color 2 to a sine sub synth in the channel rack
+
+===========================================================================
+  TROUBLESHOOTING
+===========================================================================
+
+  "Sub-bass sounds muddy/phasey"
+  - Lower the Sub Filter Cutoff (try 0.15-0.25)
+  - Enable Mono Sub (forces center pan)
+  - Add a small Timing Offset (+3 to +8 ticks)
+
+  "Fifth sounds out of key"
+  - Enable Snap to Scale (Nearest mode)
+  - Make sure scale highlighting is set in the piano roll
+
+  "Notes are being skipped"
+  - Collision detection is preventing duplicates at same time+pitch
+  - This is intentional — prevents voice stealing and CPU spikes
+  - Check if existing notes already occupy those positions
+
+===========================================================================

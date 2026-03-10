@@ -1,0 +1,557 @@
+"""Bass Humanizer Pro - Professional humanization for programmed bass lines.
+
+Takes a quantized, mechanical bass line and adds realistic human feel
+using Gaussian timing distribution, velocity-dependent filter/pitch
+modulation, dynamic time signature awareness, triplet detection,
+ghost note coloring, and monophonic overlap prevention with legato gap.
+
+Enhanced from audit recommendations for production-grade realism.
+"""
+
+import flpianoroll as flp
+import math
+
+
+FEEL_MODES = [
+    'Subtle Feel',
+    'Funk Pocket (behind beat)',
+    'Driving Push (ahead of beat)',
+    'Swing',
+    'Laid Back',
+    'Aggressive',
+    'Finger Bass (muted)',
+    'Slap Bass',
+]
+
+# ---------------------------------------------------------------------------
+# LCG random & Box-Muller Gaussian (no stdlib random available)
+# ---------------------------------------------------------------------------
+_rng_state = 9973
+
+
+def _rand():
+    """Return uniform random float in [0, 1)."""
+    global _rng_state
+    _rng_state = (_rng_state * 1103515245 + 12345) & 0x7FFFFFFF
+    return _rng_state / 0x7FFFFFFF
+
+
+def _seed(val):
+    global _rng_state
+    _rng_state = max(1, int(val) & 0x7FFFFFFF)
+
+
+def _gauss(mu, sigma):
+    """Box-Muller transform for Gaussian random using LCG."""
+    u1 = max(1e-10, _rand())
+    u2 = _rand()
+    z = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+    return mu + sigma * z
+
+
+# ---------------------------------------------------------------------------
+# Dynamic time signature helpers
+# ---------------------------------------------------------------------------
+def _get_time_sig():
+    """Get the current time signature from FL Studio score.
+
+    Returns (numerator, denominator). Falls back to 4/4.
+    """
+    try:
+        num = flp.score.tsnum
+        den = flp.score.tsden
+        if num > 0 and den > 0:
+            return (num, den)
+    except Exception:
+        pass
+    return (4, 4)
+
+
+def _get_local_time_sig(tick):
+    """Check for time signature markers (mode == 8) before this tick.
+
+    Returns (num, den) from the most recent time sig marker, or the
+    global time sig if no marker is found.
+    """
+    global_ts = _get_time_sig()
+    try:
+        best_tick = -1
+        best_ts = global_ts
+        for i in range(flp.score.markerCount):
+            marker = flp.score.getMarker(i)
+            if marker.mode == 8 and marker.time <= tick:
+                if marker.time > best_tick:
+                    best_tick = marker.time
+                    # Time sig markers encode num/den in tsnum/tsden
+                    try:
+                        best_ts = (marker.tsnum, marker.tsden)
+                    except Exception:
+                        pass
+        return best_ts
+    except Exception:
+        return global_ts
+
+
+def _beat_length(ppq, ts_den):
+    """Calculate one beat length in ticks based on denominator."""
+    # PPQ is always quarter-note based
+    if ts_den == 8:
+        return ppq // 2
+    elif ts_den == 2:
+        return ppq * 2
+    return ppq  # default quarter note
+
+
+# ---------------------------------------------------------------------------
+# Triplet detection — analyze note deltas
+# ---------------------------------------------------------------------------
+def _detect_triplets(notes, ppq):
+    """Detect if the note pattern uses a triplet grid.
+
+    Checks if note-to-note deltas are predominantly triplet divisions
+    (PPQ/3, PPQ*2/3, PPQ/6). Returns True if >40% of deltas match.
+    """
+    if len(notes) < 3:
+        return False
+
+    sorted_notes = sorted(notes, key=lambda n: n.time)
+    triplet_units = [ppq // 3, ppq * 2 // 3, ppq // 6]
+    tolerance = ppq // 24  # ~tight tolerance
+
+    triplet_count = 0
+    total_deltas = 0
+
+    for i in range(1, len(sorted_notes)):
+        delta = sorted_notes[i].time - sorted_notes[i - 1].time
+        if delta <= 0:
+            continue
+        total_deltas += 1
+        for unit in triplet_units:
+            if unit > 0 and abs(delta % unit) <= tolerance:
+                triplet_count += 1
+                break
+
+    if total_deltas == 0:
+        return False
+    return (triplet_count / total_deltas) > 0.4
+
+
+# ---------------------------------------------------------------------------
+# Clone helper — preserves ALL note properties including FL-specific ones
+# ---------------------------------------------------------------------------
+def _clone_note(src, pitch=None, time=None, length=None, velocity=None,
+                fcut=None, pitchofs=None):
+    """Create a full copy of a Note with optional overrides."""
+    n = flp.Note()
+    n.number = pitch if pitch is not None else src.number
+    n.time = time if time is not None else src.time
+    n.length = length if length is not None else src.length
+    n.velocity = velocity if velocity is not None else src.velocity
+    n.color = src.color
+    n.pan = src.pan
+    n.fcut = fcut if fcut is not None else src.fcut
+    n.fres = src.fres
+    n.group = src.group
+    # Preserve extended FL Studio per-note properties
+    try:
+        n.pitchofs = pitchofs if pitchofs is not None else src.pitchofs
+    except Exception:
+        if pitchofs is not None:
+            try:
+                n.pitchofs = pitchofs
+            except Exception:
+                pass
+    try:
+        n.slide = src.slide
+    except Exception:
+        pass
+    try:
+        n.porta = src.porta
+    except Exception:
+        pass
+    try:
+        n.muted = src.muted
+    except Exception:
+        pass
+    return n
+
+
+# ---------------------------------------------------------------------------
+# Filter cutoff modulation — velocity-dependent brightness
+# ---------------------------------------------------------------------------
+def _velocity_to_fcut(velocity, base_fcut, fcut_amount):
+    """Map velocity to filter cutoff exponentially.
+
+    Hard attack (high velocity) = bright open filter
+    Soft attack (low velocity) = muffled, darker tone
+    fcut_amount controls the depth of modulation.
+    """
+    if fcut_amount <= 0:
+        return base_fcut
+
+    # Exponential mapping: vel^2 for natural response curve
+    # velocity is 0.0-1.0, map to fcut range
+    vel_factor = velocity * velocity  # exponential curve
+    # Modulate around base_fcut: soft notes go darker, hard notes go brighter
+    # fcut range is 0-256 in FL Studio (8-bit)
+    modulation = (vel_factor - 0.5) * 2.0 * fcut_amount * 128
+    new_fcut = base_fcut + modulation
+    return max(0, min(256, int(new_fcut)))
+
+
+# ---------------------------------------------------------------------------
+# Pitch drift via pitchofs — velocity-dependent micro-tuning
+# ---------------------------------------------------------------------------
+def _velocity_to_pitchofs(velocity, base_pitchofs, drift_amount):
+    """Generate pitch drift based on velocity.
+
+    High velocity: +10-20 cents sharp (digging in)
+    Normal velocity: Gaussian ±10 cents (natural drift)
+    drift_amount scales the effect (0.0-1.0)
+    pitchofs range: -120 to +120 (in cents)
+    """
+    if drift_amount <= 0:
+        return base_pitchofs
+
+    if velocity > 0.75:
+        # High velocity: tend sharp (digging in hard)
+        drift = _gauss(15.0, 5.0) * drift_amount
+    elif velocity > 0.5:
+        # Medium velocity: slight sharp tendency
+        drift = _gauss(5.0, 8.0) * drift_amount
+    else:
+        # Low velocity: random drift, slight flat tendency
+        drift = _gauss(-3.0, 10.0) * drift_amount
+
+    new_pitchofs = base_pitchofs + drift
+    return max(-120, min(120, int(new_pitchofs)))
+
+
+# ---------------------------------------------------------------------------
+# Ghost note detection via note color
+# ---------------------------------------------------------------------------
+GHOST_NOTE_COLOR = 1  # Color index 1 = ghost note
+
+
+def _apply_ghost_note(note_clone, ghost_amount):
+    """Apply ghost note treatment: truncate length, drop velocity, crush fcut."""
+    if ghost_amount <= 0:
+        return note_clone
+
+    # Truncate length to 40-60% of original
+    len_factor = 0.5 - (ghost_amount * 0.1)
+    note_clone.length = max(1, int(note_clone.length * max(0.3, len_factor)))
+
+    # Drop velocity significantly
+    vel_drop = 0.35 + (ghost_amount * 0.15)
+    note_clone.velocity = max(0.01, note_clone.velocity * (1.0 - vel_drop))
+
+    # Crush filter cutoff (muffled ghost notes)
+    try:
+        note_clone.fcut = max(0, int(note_clone.fcut * 0.4))
+    except Exception:
+        pass
+
+    return note_clone
+
+
+# ---------------------------------------------------------------------------
+# Monophonic overlap prevention
+# ---------------------------------------------------------------------------
+def _prevent_overlaps(notes, legato_gap):
+    """Truncate overlapping notes for monophonic bass lines.
+
+    Sorts by time, then ensures each note ends before or at the start
+    of the next note minus the legato gap.
+    """
+    if len(notes) < 2:
+        return notes
+
+    sorted_notes = sorted(notes, key=lambda n: (n.time, -n.number))
+
+    for i in range(len(sorted_notes) - 1):
+        curr = sorted_notes[i]
+        nxt = sorted_notes[i + 1]
+        max_end = nxt.time - legato_gap
+        if curr.time + curr.length > max_end:
+            curr.length = max(1, max_end - curr.time)
+
+    return sorted_notes
+
+
+# ---------------------------------------------------------------------------
+# Control Surface .fst support
+# ---------------------------------------------------------------------------
+_FST_FILE = 'Bass Humanizer.fst'
+
+
+def _try_load_surface():
+    """Attempt to load the Control Surface .fst GUI."""
+    try:
+        form = flp.LoadSurface(_FST_FILE)
+        if form is not None:
+            return form
+    except Exception:
+        pass
+    return None
+
+
+def _build_standard_dialog():
+    """Build the standard ScriptDialog fallback UI."""
+    form = flp.ScriptDialog(
+        'Bass Humanizer Pro',
+        'Professional humanization for programmed bass lines.\r\n\r\n'
+        'FEEL MODES set the character — knobs scale the intensity.\r\n'
+        'Subtle Feel: Light variation for natural movement.\r\n'
+        'Funk Pocket: Notes behind the beat for groove.\r\n'
+        'Driving Push: Notes ahead of the beat for energy.\r\n'
+        'Swing: Shuffle feel on even eighth notes.\r\n'
+        'Laid Back: Everything relaxed and late.\r\n'
+        'Aggressive: Rush downbeats, strong accents.\r\n'
+        'Finger Bass: Shorter notes, softer ghost notes.\r\n'
+        'Slap Bass: Sharp accents, tight notes.\r\n\r\n'
+        'FILTER MOD maps velocity to filter cutoff for timbral dynamics.\r\n'
+        'PITCH DRIFT adds micro-tuning variation based on velocity.\r\n'
+        'GHOST NOTES: Set note color 1 for ghost note treatment.\r\n'
+        'MONO MODE prevents overlapping notes with configurable gap.\r\n\r\n'
+        'TIP: Build the Control Surface layout and save as\r\n'
+        '"Bass Humanizer.fst" in the scripts folder for a premium GUI.'
+    )
+    form.AddInputCombo('Feel', FEEL_MODES, 0)
+    form.AddInputKnob('Timing Amount', 0.30, 0.00, 1.00)
+    form.AddInputKnob('Velocity Amount', 0.25, 0.00, 1.00)
+    form.AddInputKnob('Length Amount', 0.15, 0.00, 1.00)
+    form.AddInputKnob('Swing', 0.00, 0.00, 0.70)
+    form.AddInputKnob('Beat Accent', 0.15, 0.00, 0.50)
+    form.AddInputKnob('Filter Mod', 0.00, 0.00, 1.00)
+    form.AddInputKnob('Pitch Drift', 0.00, 0.00, 1.00)
+    form.AddInputKnob('Ghost Amount', 0.50, 0.00, 1.00)
+    form.AddInputCheckbox('Mono Mode', True)
+    form.AddInputKnobInt('Legato Gap', 10, 0, 50)
+    form.AddInputCheckbox('Selected Notes Only', True)
+    return form
+
+
+def createDialog():
+    """Try Control Surface first, fall back to ScriptDialog."""
+    form = _try_load_surface()
+    if form is not None:
+        return form
+    return _build_standard_dialog()
+
+
+# ---------------------------------------------------------------------------
+# Apply — all computation in Python memory, single commit to score
+# ---------------------------------------------------------------------------
+def apply(form):
+    feel = int(form.GetInputValue('Feel'))
+    timing_amt = form.GetInputValue('Timing Amount')
+    velocity_amt = form.GetInputValue('Velocity Amount')
+    length_amt = form.GetInputValue('Length Amount')
+    swing_amt = form.GetInputValue('Swing')
+    beat_accent = form.GetInputValue('Beat Accent')
+    filter_mod = form.GetInputValue('Filter Mod')
+    pitch_drift = form.GetInputValue('Pitch Drift')
+    ghost_amount = form.GetInputValue('Ghost Amount')
+    mono_mode = bool(form.GetInputValue('Mono Mode'))
+    legato_gap = int(form.GetInputValue('Legato Gap'))
+    selected_only = bool(form.GetInputValue('Selected Notes Only'))
+
+    ppq = flp.score.PPQ
+
+    # Get time signature
+    ts_num, ts_den = _get_time_sig()
+    one_beat = _beat_length(ppq, ts_den)
+    bar_length = one_beat * ts_num
+
+    # Collect notes
+    source_notes = []
+    other_notes = []
+    for i in range(flp.score.noteCount):
+        note = flp.score.getNote(i)
+        if selected_only and not note.selected:
+            other_notes.append(note)
+        else:
+            source_notes.append(note)
+
+    if not source_notes:
+        return
+
+    _seed(sum(n.time * 3 + n.number * 7 + n.length for n in source_notes))
+
+    # Detect triplet grid
+    is_triplet = _detect_triplets(source_notes, ppq)
+
+    # Apply feel-specific parameter overrides
+    if feel == 0:      # Subtle Feel
+        time_bias = 0.0
+        vel_curve = 'flat'
+        len_factor = 1.0
+    elif feel == 1:    # Funk Pocket
+        time_bias = 0.4
+        vel_curve = 'offbeat_soft'
+        len_factor = 0.92
+    elif feel == 2:    # Driving Push
+        time_bias = -0.35
+        vel_curve = 'consistent'
+        len_factor = 0.95
+    elif feel == 3:    # Swing
+        time_bias = 0.0
+        vel_curve = 'swing_accent'
+        len_factor = 1.0
+        if swing_amt == 0.0:
+            swing_amt = 0.33
+    elif feel == 4:    # Laid Back
+        time_bias = 0.6
+        vel_curve = 'decaying'
+        len_factor = 1.05
+    elif feel == 5:    # Aggressive
+        time_bias = -0.2
+        vel_curve = 'accented'
+        len_factor = 0.88
+    elif feel == 6:    # Finger Bass
+        time_bias = 0.1
+        vel_curve = 'ghost_notes'
+        len_factor = 0.75
+    elif feel == 7:    # Slap Bass
+        time_bias = -0.15
+        vel_curve = 'slap_pattern'
+        len_factor = 0.65
+    else:
+        time_bias = 0.0
+        vel_curve = 'flat'
+        len_factor = 1.0
+
+    # Process each note
+    humanized_notes = []
+    step_eighth = ppq // 2
+
+    for note in source_notes:
+        # Get local time signature at this note's position
+        local_ts = _get_local_time_sig(note.time)
+        local_beat = _beat_length(ppq, local_ts[1])
+        local_bar = local_beat * local_ts[0]
+
+        # Determine beat position using local time signature
+        beat_pos = (note.time % local_bar) / local_beat
+        is_downbeat = (note.time % local_beat) < (local_beat // 8)
+        is_even_eighth = ((note.time // step_eighth) % 2) == 1
+        eighth_pos = (note.time // step_eighth) % (local_ts[0] * 2)
+
+        # --- Timing humanization (Gaussian) ---
+        # Gaussian distribution instead of uniform for more natural clustering
+        time_random = _gauss(0.0, 0.4)  # Gaussian centered at 0, sigma 0.4
+        time_random = max(-1.0, min(1.0, time_random))  # soft clamp
+
+        max_shift = local_beat // 8  # Max shift = 1/32 note
+        time_offset = time_bias * timing_amt * max_shift
+        time_offset += time_random * timing_amt * max_shift * 0.5
+
+        # Swing: shift even eighth notes later (bypass on triplets)
+        if is_even_eighth and swing_amt > 0 and not is_triplet:
+            time_offset += swing_amt * step_eighth
+
+        # --- Velocity humanization (Gaussian) ---
+        base_vel = note.velocity
+
+        # Beat accent
+        if is_downbeat:
+            base_vel += beat_accent
+        else:
+            base_vel -= beat_accent * 0.3
+
+        # Apply velocity curve based on feel
+        vel_mod = 0.0
+        if vel_curve == 'flat':
+            vel_mod = _gauss(0.0, velocity_amt * 0.1)
+
+        elif vel_curve == 'offbeat_soft':
+            if not is_downbeat:
+                vel_mod = -velocity_amt * 0.15
+            vel_mod += _gauss(0.0, velocity_amt * 0.05)
+
+        elif vel_curve == 'consistent':
+            vel_mod = _gauss(0.0, velocity_amt * 0.04)
+
+        elif vel_curve == 'swing_accent':
+            if eighth_pos in (0, local_ts[0]):
+                vel_mod = velocity_amt * 0.12
+            elif eighth_pos in (2, local_ts[0] + 2):
+                vel_mod = -velocity_amt * 0.08
+            vel_mod += _gauss(0.0, velocity_amt * 0.05)
+
+        elif vel_curve == 'decaying':
+            decay = beat_pos / local_ts[0]
+            vel_mod = -decay * velocity_amt * 0.15
+            vel_mod += _gauss(0.0, velocity_amt * 0.05)
+
+        elif vel_curve == 'accented':
+            if is_downbeat:
+                vel_mod = velocity_amt * 0.2
+            else:
+                vel_mod = velocity_amt * 0.08
+            vel_mod += _gauss(0.0, velocity_amt * 0.025)
+
+        elif vel_curve == 'ghost_notes':
+            if is_downbeat:
+                vel_mod = velocity_amt * 0.05
+            else:
+                vel_mod = -velocity_amt * 0.25
+            vel_mod += _gauss(0.0, velocity_amt * 0.04)
+
+        elif vel_curve == 'slap_pattern':
+            if eighth_pos in (0, local_ts[0]):
+                vel_mod = velocity_amt * 0.25
+            elif eighth_pos in (2, local_ts[0] + 2):
+                vel_mod = velocity_amt * 0.15
+            else:
+                vel_mod = -velocity_amt * 0.1
+            vel_mod += _gauss(0.0, velocity_amt * 0.025)
+
+        new_vel = max(0.01, min(1.0, base_vel + vel_mod))
+
+        # --- Length humanization (Gaussian) ---
+        len_random = 1.0 + _gauss(0.0, length_amt * 0.15)
+        len_random = max(0.5, min(1.5, len_random))
+        new_length = max(1, int(note.length * len_factor * len_random))
+
+        # --- Timing clamp ---
+        new_time = max(0, int(note.time + time_offset))
+
+        # --- Filter cutoff modulation ---
+        base_fcut = note.fcut
+        new_fcut = _velocity_to_fcut(new_vel, base_fcut, filter_mod)
+
+        # --- Pitch drift ---
+        base_pitchofs = 0
+        try:
+            base_pitchofs = note.pitchofs
+        except Exception:
+            pass
+        new_pitchofs = _velocity_to_pitchofs(new_vel, base_pitchofs, pitch_drift)
+
+        # --- Create humanized note with full property preservation ---
+        n = _clone_note(
+            note,
+            time=new_time,
+            length=new_length,
+            velocity=new_vel,
+            fcut=new_fcut,
+            pitchofs=new_pitchofs,
+        )
+
+        # --- Color-based ghost note treatment ---
+        if note.color == GHOST_NOTE_COLOR and ghost_amount > 0:
+            n = _apply_ghost_note(n, ghost_amount)
+
+        humanized_notes.append(n)
+
+    # --- Monophonic overlap prevention ---
+    if mono_mode:
+        humanized_notes = _prevent_overlaps(humanized_notes, legato_gap)
+
+    # --- Single commit to score ---
+    all_notes = list(other_notes) + humanized_notes
+    flp.score.clearNotes(True)
+    for note in all_notes:
+        flp.score.addNote(note)

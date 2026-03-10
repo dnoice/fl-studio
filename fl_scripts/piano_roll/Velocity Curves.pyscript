@@ -1,65 +1,279 @@
-"""Velocity Curves - Apply mathematical velocity curves to selected notes.
+"""Velocity Curves Pro - Apply mathematical velocity curves to selected notes.
 
-Supports linear ramps, exponential, logarithmic, sine wave, random,
-and custom accent patterns across the time span of selected notes.
+Supports FL Studio native tension curves, S-curves, cubic Bezier,
+sine/cosine/triangle, Euclidean accent patterns (time-sig aware),
+and Gaussian humanization overlay. All randomness is deterministic
+(seeded) so preview always matches accept.
 """
 
 import flpianoroll as flp
 import math
-import time
+import os
 
-
-CURVE_TYPES = [
-    'Linear Ramp',
-    'Exponential',
-    'Logarithmic',
+# ---------------------------------------------------------------------------
+# Curve modes
+# ---------------------------------------------------------------------------
+CURVE_MODES = [
+    'Linear (Tension)',
+    'S-Curve (Tension)',
     'Sine Wave',
     'Cosine Fade',
     'Triangle',
-    'Random',
-    'Accent Pattern (4/4)',
-    'Crescendo',
-    'Decrescendo',
+    'Bezier',
+    'Euclidean Accent',
+    'Humanize Only',
 ]
 
+# ---------------------------------------------------------------------------
+# Deterministic RNG (xorshift32)
+# ---------------------------------------------------------------------------
+_rng_state = 1
 
-def rand_float(seed=None):
-    """Simple pseudo-random float generator 0.0-1.0."""
-    state = time.time_ns() if seed is None else seed
+def _seed_rng(s):
+    global _rng_state
+    _rng_state = max(1, s & 0xFFFFFFFF)
+
+def _rand():
+    """Return a float in (0, 1)."""
+    global _rng_state
+    x = _rng_state
+    x ^= (x << 13) & 0xFFFFFFFF
+    x ^= (x >> 17)
+    x ^= (x << 5) & 0xFFFFFFFF
+    _rng_state = x & 0xFFFFFFFF
+    return max(1e-10, (_rng_state & 0x7FFFFFFF) / 0x80000000)
+
+def _gauss():
+    """Box-Muller transform: return a standard normal variate (mean=0, sd=1)."""
+    u1 = _rand()
+    u2 = _rand()
+    return math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+
+# ---------------------------------------------------------------------------
+# FL Studio native tension curve (from audit §3.1)
+# f(t, R) = (2^(-10*R*t) - 1) / (2^(-10*R) - 1)
+# ---------------------------------------------------------------------------
+def _fl_tension_curve(t, tension):
+    """Compute FL Studio native tension curve value for t in [0,1].
+    tension in [-1, 1]: 0=linear, positive=ease-in (convex),
+    negative=ease-out (concave).
+    """
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+    if abs(tension) < 0.001:
+        return t
+
+    # Map tension v to internal rate R (audit §3.1)
+    if tension > 0:
+        R = math.log2(tension + 1.0) / 10.0
+    else:
+        R = -math.log2(-tension + 1.0) / 10.0
+
+    # Core formula: f(t, R) = (2^(-10*R*t) - 1) / (2^(-10*R) - 1)
+    exp_rt = math.pow(2.0, -10.0 * R * t)
+    exp_r = math.pow(2.0, -10.0 * R)
+    denom = exp_r - 1.0
+    if abs(denom) < 1e-12:
+        return t
+    return (exp_rt - 1.0) / denom
+
+# ---------------------------------------------------------------------------
+# S-Curve (Double Curve) — piecewise tension mirrored at midpoint (audit §4)
+# ---------------------------------------------------------------------------
+def _s_curve(t, tension):
+    """Compute S-curve (sigmoidal) using piecewise tension."""
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+    if abs(tension) < 0.001:
+        return t
+
+    if t <= 0.5:
+        # Lower hemisphere: scale t to [0,1], evaluate, halve
+        t_prime = t * 2.0
+        return _fl_tension_curve(t_prime, tension) / 2.0
+    else:
+        # Upper hemisphere: mirror with inverted tension direction
+        t_prime = (t - 0.5) * 2.0
+        return 0.5 + (1.0 - _fl_tension_curve(1.0 - t_prime, tension)) / 2.0
+
+# ---------------------------------------------------------------------------
+# Cubic Bezier with Newton-Raphson solver (audit §5)
+# P0=(0,0), P1=(x1,y1), P2=(x2,y2), P3=(1,1)
+# ---------------------------------------------------------------------------
+def _bezier_x(s, x1, x2):
+    """Evaluate x(s) for cubic Bezier."""
+    os = 1.0 - s
+    return 3.0 * os * os * s * x1 + 3.0 * os * s * s * x2 + s * s * s
+
+def _bezier_dx(s, x1, x2):
+    """Derivative x'(s) for Newton-Raphson."""
+    os = 1.0 - s
+    return 3.0 * os * os * x1 + 6.0 * os * s * (x2 - x1) + 3.0 * s * s * (1.0 - x2)
+
+def _bezier_y(s, y1, y2):
+    """Evaluate y(s) for cubic Bezier."""
+    os = 1.0 - s
+    return 3.0 * os * os * s * y1 + 3.0 * os * s * s * y2 + s * s * s
+
+def _bezier_solve(t, x1, y1, x2, y2):
+    """Given time t in [0,1], find s via Newton-Raphson, then return y(s)."""
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+
+    # Initial guess: s = t (good for monotonic curves)
+    s = t
+    for _ in range(8):
+        x_val = _bezier_x(s, x1, x2)
+        dx_val = _bezier_dx(s, x1, x2)
+        if abs(dx_val) < 1e-12:
+            break
+        s = s - (x_val - t) / dx_val
+        s = max(0.0, min(1.0, s))
+
+    return _bezier_y(s, y1, y2)
+
+# ---------------------------------------------------------------------------
+# Bjorklund Euclidean algorithm (reused pattern from Ghost Note Generator)
+# ---------------------------------------------------------------------------
+def _bjorklund(k, n):
+    """Generate Euclidean rhythm E(k, n) using Bjorklund's algorithm.
+    Returns a list of n booleans (True = accent).
+    """
+    if k <= 0:
+        return [False] * n
+    if k >= n:
+        return [True] * n
+
+    groups = [[True]] * k + [[False]] * (n - k)
     while True:
-        state = (state * 1103515245 + 12345) & 0x7FFFFFFF
-        yield state / 0x7FFFFFFF
+        remainder = []
+        main = []
+        # Split: main = shorter list, remainder = longer
+        if len(groups) <= 1:
+            break
+        # Find the split point
+        first_len = len(groups[0])
+        split = 0
+        for i in range(1, len(groups)):
+            if len(groups[i]) != first_len:
+                split = i
+                break
+        else:
+            break
 
+        if split == 0:
+            break
 
-def createDialog():
+        main = groups[:split]
+        remainder = groups[split:]
+
+        if len(remainder) <= 1:
+            break
+
+        # Distribute remainder onto main
+        new_groups = []
+        for i in range(len(main)):
+            if i < len(remainder):
+                new_groups.append(main[i] + remainder[i])
+            else:
+                new_groups.append(main[i])
+        # Any leftover remainder
+        for i in range(len(main), len(remainder)):
+            new_groups.append(remainder[i])
+
+        groups = new_groups
+
+    result = []
+    for g in groups:
+        result.extend(g)
+    return result
+
+# ---------------------------------------------------------------------------
+# Control Surface support
+# ---------------------------------------------------------------------------
+_SURFACE_NAME = 'Velocity Curves.fst'
+
+def _try_load_surface():
+    try:
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), _SURFACE_NAME
+        )
+        if os.path.isfile(path):
+            form = flp.ScriptDialog('Velocity Curves Pro', '')
+            form.LoadSurface(path)
+            return form
+    except Exception:
+        pass
+    return None
+
+def _build_standard_dialog():
     form = flp.ScriptDialog(
-        'Velocity Curves',
-        'Apply velocity curves across the time span of selected notes.\r\n'
-        'Start/End Velocity set the range. Curve Type shapes the transition.\r\n'
-        'Strength blends between original velocity and the curve.'
+        'Velocity Curves Pro',
+        'Apply velocity curves with FL Studio native tension.\r\n'
+        'Tension shapes the curve: 0=linear, +=ease-in, -=ease-out.\r\n'
+        'Humanize adds Gaussian jitter as an overlay on any mode.'
     )
-    form.AddInputCombo('Curve Type', CURVE_TYPES, 0)
+    form.AddInputCombo('Curve Type', CURVE_MODES, 0)
     form.AddInputKnob('Start Velocity', 0.3, 0.0, 1.0)
     form.AddInputKnob('End Velocity', 1.0, 0.0, 1.0)
+    form.AddInputKnob('Tension', 0.0, -1.0, 1.0)
     form.AddInputKnob('Strength', 1.0, 0.0, 1.0)
     form.AddInputKnob('Sine Cycles', 1.0, 0.25, 8.0)
+    form.AddInputKnob('Bezier X1', 0.25, 0.0, 1.0)
+    form.AddInputKnob('Bezier Y1', 0.0, 0.0, 1.0)
+    form.AddInputKnob('Bezier X2', 0.75, 0.0, 1.0)
+    form.AddInputKnob('Bezier Y2', 1.0, 0.0, 1.0)
+    form.AddInputKnobInt('Accent Count', 3, 1, 16)
+    form.AddInputKnob('Accent Boost', 0.20, 0.0, 0.50)
+    form.AddInputKnob('Humanize', 0.0, 0.0, 1.0)
+    form.AddInputKnobInt('Seed', 0, 0, 9999)
+    form.AddInputCheckbox('Ignore Muted Notes', True)
     form.AddInputCheckbox('Selected Notes Only', True)
     return form
 
+def createDialog():
+    form = _try_load_surface()
+    if form is not None:
+        return form
+    return _build_standard_dialog()
 
+# ---------------------------------------------------------------------------
+# Main apply
+# ---------------------------------------------------------------------------
 def apply(form):
     curve_type = int(form.GetInputValue('Curve Type'))
     vel_start = form.GetInputValue('Start Velocity')
     vel_end = form.GetInputValue('End Velocity')
+    tension = form.GetInputValue('Tension')
     strength = form.GetInputValue('Strength')
     sine_cycles = form.GetInputValue('Sine Cycles')
-    selected_only = form.GetInputValue('Selected Notes Only')
+    bx1 = form.GetInputValue('Bezier X1')
+    by1 = form.GetInputValue('Bezier Y1')
+    bx2 = form.GetInputValue('Bezier X2')
+    by2 = form.GetInputValue('Bezier Y2')
+    accent_count = int(form.GetInputValue('Accent Count'))
+    accent_boost = form.GetInputValue('Accent Boost')
+    humanize = form.GetInputValue('Humanize')
+    seed = int(form.GetInputValue('Seed'))
+    ignore_muted = int(form.GetInputValue('Ignore Muted Notes'))
+    selected_only = int(form.GetInputValue('Selected Notes Only'))
 
-    # Gather notes
+    # Seed RNG
+    _seed_rng(seed * 2654435761 + 99991)
+
+    # Gather eligible notes (in-place references)
     notes = []
     for i in range(flp.score.noteCount):
         note = flp.score.getNote(i)
         if selected_only and not note.selected:
+            continue
+        if ignore_muted and note.muted:
             continue
         notes.append(note)
 
@@ -71,46 +285,92 @@ def apply(form):
     max_time = max(n.time for n in notes)
     time_span = max_time - min_time
 
-    rng = rand_float()
+    # Pre-compute Euclidean accent array if needed
+    euclid_array = None
+    euclid_steps = 0
+    if curve_type == 6:  # Euclidean Accent
+        # Adapt to project time signature
+        tsnum = flp.score.tsnum
+        tsden = flp.score.tsden
+        # Steps per measure: tsnum subdivisions
+        # For compound meters (x/8), use tsnum as-is
+        euclid_steps = max(2, tsnum)
+        euclid_array = _bjorklund(min(accent_count, euclid_steps), euclid_steps)
 
+    # Process each note
     for note in notes:
-        t = (note.time - min_time) / time_span if time_span > 0 else 0.0
+        # Compute normalized time t in [0, 1]
+        if time_span > 0:
+            t = (note.time - min_time) / time_span
+        else:
+            # Single note or vertical chord: treat as midpoint
+            t = 0.5
 
-        # Compute curve value
-        if curve_type == 0:    # Linear Ramp
-            curve_val = t
-        elif curve_type == 1:  # Exponential
-            curve_val = t ** 2.5
-        elif curve_type == 2:  # Logarithmic
-            curve_val = math.log(1 + t * 9) / math.log(10)
-        elif curve_type == 3:  # Sine Wave
-            curve_val = 0.5 + 0.5 * math.sin(2 * math.pi * sine_cycles * t)
-        elif curve_type == 4:  # Cosine Fade
+        # --- Evaluate curve value in [0, 1] ---
+        if curve_type == 0:        # Linear (with tension)
+            curve_val = _fl_tension_curve(t, tension)
+
+        elif curve_type == 1:      # S-Curve (with tension)
+            curve_val = _s_curve(t, tension)
+
+        elif curve_type == 2:      # Sine Wave
+            curve_val = 0.5 + 0.5 * math.sin(2.0 * math.pi * sine_cycles * t)
+
+        elif curve_type == 3:      # Cosine Fade
             curve_val = 0.5 - 0.5 * math.cos(math.pi * t)
-        elif curve_type == 5:  # Triangle
+
+        elif curve_type == 4:      # Triangle
             curve_val = 1.0 - abs(2.0 * t - 1.0)
-        elif curve_type == 6:  # Random
-            curve_val = next(rng)
-        elif curve_type == 7:  # Accent Pattern (4/4)
-            beat_pos = (note.time / flp.score.PPQ) % 4
-            if beat_pos < 0.1:      # Beat 1 (strong)
-                curve_val = 1.0
-            elif abs(beat_pos - 2) < 0.1:  # Beat 3 (medium)
-                curve_val = 0.85
-            elif abs(beat_pos - 1) < 0.1 or abs(beat_pos - 3) < 0.1:  # Beats 2,4
-                curve_val = 0.65
-            else:  # Off-beats
-                curve_val = 0.5
-        elif curve_type == 8:  # Crescendo
-            curve_val = t ** 1.5
-        elif curve_type == 9:  # Decrescendo
-            curve_val = (1.0 - t) ** 1.5
+
+        elif curve_type == 5:      # Bezier
+            curve_val = _bezier_solve(t, bx1, by1, bx2, by2)
+
+        elif curve_type == 6:      # Euclidean Accent
+            # Determine which step this note falls on
+            tsden = flp.score.tsden
+            # Ticks per subdivision step
+            ticks_per_step = flp.score.PPQ * 4.0 / tsden / euclid_steps
+            if ticks_per_step > 0:
+                step_idx = int(note.time / ticks_per_step) % euclid_steps
+            else:
+                step_idx = 0
+
+            # Accent or de-accent
+            if euclid_array[step_idx]:
+                curve_val = 1.0  # accent position
+            else:
+                curve_val = 0.0  # weak position
+
+        elif curve_type == 7:      # Humanize Only
+            # No curve reshape — keep original velocity, only jitter applies
+            curve_val = None
+
         else:
             curve_val = t
 
-        # Map curve value to velocity range
-        target_vel = vel_start + (vel_end - vel_start) * curve_val
+        # --- Map curve value to velocity range and blend ---
+        if curve_val is not None:
+            # Map curve [0,1] to [start, end] velocity
+            target_vel = vel_start + (vel_end - vel_start) * curve_val
 
-        # Blend with original velocity using strength
-        note.velocity = note.velocity + (target_vel - note.velocity) * strength
-        note.velocity = max(0.0, min(1.0, note.velocity))
+            # Euclidean mode: boost/cut based on accent
+            if curve_type == 6:
+                if euclid_array and step_idx < len(euclid_array):
+                    if euclid_array[step_idx]:
+                        target_vel = note.velocity + accent_boost
+                    else:
+                        target_vel = note.velocity - accent_boost * 0.5
+
+            # Blend with original using strength
+            new_vel = note.velocity + (target_vel - note.velocity) * strength
+        else:
+            # Humanize Only: start from current velocity
+            new_vel = note.velocity
+
+        # --- Gaussian humanize overlay (applies to ALL modes) ---
+        if humanize > 0.001:
+            jitter = _gauss() * humanize * 0.15  # scale: humanize=1.0 → ~15% σ
+            new_vel = new_vel + jitter
+
+        # Clamp and assign
+        note.velocity = max(0.0, min(1.0, new_vel))

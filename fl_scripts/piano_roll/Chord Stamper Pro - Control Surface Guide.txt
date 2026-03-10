@@ -1,0 +1,201 @@
+===========================================================================
+  CHORD STAMPER PRO — Control Surface (.fst) Build Guide
+===========================================================================
+
+  This guide tells you exactly how to build the custom GUI in FL Studio's
+  Control Surface plugin. When done, the script auto-detects and uses it.
+  If the .fst file is missing, the script falls back to the standard dialog.
+
+  REQUIREMENTS: FL Studio 24.1.0 or later (LoadSurface API)
+
+===========================================================================
+  STEP 1: CREATE THE CONTROL SURFACE PRESET
+===========================================================================
+
+  1. Open FL Studio
+  2. Add a new "Control Surface" plugin instance (Add > More Plugins)
+  3. Right-click the Control Surface title bar > choose a dark background
+  4. Build the layout described below using drag-and-drop controls
+  5. When done: Presets menu > "Save preset as..." >
+     Save as: "Chord Stamper Pro.fst"
+  6. Copy the .fst file to your piano roll scripts folder:
+     Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  The script looks for a file named exactly: "Chord Stamper Pro.fst"
+
+===========================================================================
+  STEP 2: LAYOUT — THREE ZONES
+===========================================================================
+
+  Arrange the GUI into three rectangular zones, left to right:
+
+  +---------------------+---------------------+------------------+
+  |   ZONE 1: HARMONY   |  ZONE 2: HUMANIZE   |  ZONE 3: CONTEXT |
+  +---------------------+---------------------+------------------+
+
+---------------------------------------------------------------------------
+  ZONE 1: HARMONY ENGINE (left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)        | Range / Options       | Default
+  ------------------|---------------------|-----------------------|--------
+  Knob (integer)  | Chord Type          | 0-34 (35 chord types) | 0
+  Knob (integer)  | Voicing             | 0-4 (5 voicing modes) | 0
+  Knob (integer) | Inversion           | 0 to 3                | 0
+  Knob| Velocity Scale      | 0.1 to 1.5            | 1.0
+
+  CHORD TYPE VALUES (for labeling your value list):
+    0  = Major               12 = Half-Dim 7th        24 = Major 13th
+    1  = Minor               13 = Min/Maj 7th         25 = Dominant 13th
+    2  = Diminished          14 = Major 9th           26 = Minor 13th
+    3  = Augmented           15 = Minor 9th           27 = Dom 7 b5
+    4  = Sus2                16 = Dominant 9th         28 = Dom 7 #5
+    5  = Sus4                17 = Add9                29 = Dom 7 b9
+    6  = Major 6th           18 = Minor Add9          30 = Dom 7 #9 (Hendrix)
+    7  = Minor 6th           19 = Major 11th (Lydian) 31 = Dom 7 #5 b9
+    8  = Major 7th           20 = Minor 11th          32 = Dom 7 #5 #9
+    9  = Minor 7th           21 = Dominant 11th        33 = Dom 7 b5 b9
+    10 = Dominant 7th        22 = Major 13th          34 = Dom 7 b5 #9
+    11 = Dim 7th             23 = Minor 13th          35 = Power (5th)
+                                                       36 = Power (5th + Oct)
+
+  VOICING VALUES:
+    0 = Close (root position)
+    1 = Inversion
+    2 = Drop 2
+    3 = Drop 3
+    4 = Drop 2 & 4
+
+  TIP: You can use toggle switches for Drop 2 / Drop 3 instead of a combo.
+  Just name them "Drop2_Toggle" and "Drop3_Toggle" — but the script currently
+  reads a single "Voicing" combo. If you prefer toggles, you'll need a small
+  script tweak to map them.
+
+---------------------------------------------------------------------------
+  ZONE 2: HUMANIZATION (center panel) — THE STAR FEATURE
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)           | Range          | Default
+  ------------------|------------------------|----------------|--------
+  X/Y Pad (X axis)  | Strum Time (16ths)     | 0.0 to 2.0    | 0.0
+  X/Y Pad (Y axis)  | Strum Tension          | 0.2 to 4.0    | 1.0
+  Knob| Humanize Spread        | 0.0 to 0.15   | 0.0
+
+  THE X/Y PAD is the centerpiece of Zone 2:
+  - Horizontal (X) = Strum Time: How long the strum takes (in 16th notes)
+    Left edge = 0 (no strum, all notes simultaneous)
+    Right edge = 2.0 (slow, two-16th-note strum)
+
+  - Vertical (Y) = Strum Tension: The acceleration curve
+    Bottom = 0.2 (decelerate — tight start, wide end)
+    Center = 1.0 (linear — evenly spaced)
+    Top = 4.0 (accelerate — wide start, tight end)
+
+  THE HUMANIZE KNOB:
+  - Controls Gaussian velocity spread (sigma)
+  - 0.0 = perfectly uniform velocity (robotic)
+  - 0.15 = wide natural variance (expressive)
+  - Place this as a large rotary knob to the right of the X/Y pad
+
+  VISUAL TIP: Add a label "STRUM" above the X/Y pad, and "DYNAMICS"
+  above the humanize knob.
+
+---------------------------------------------------------------------------
+  ZONE 3: CONTEXT (right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)           | Range / Options | Default
+  ------------------|------------------------|-----------------|--------
+  Knob (integer)  | Snap to Scale          | 0-3 (4 options) | 0
+  CheckBox     | Keep Original Notes    | 0 or 1          | 1 (on)
+  CheckBox     | Selected Notes Only    | 0 or 1          | 1 (on)
+
+  SNAP TO SCALE VALUES:
+    0 = Off
+    1 = Nearest
+    2 = Up
+    3 = Down
+
+  IMPORTANT: The "Snap to Scale" feature reads the piano roll's scale
+  highlighting (Helpers > Scale highlighting). If no scale is set in
+  the piano roll, snapping does nothing regardless of this setting.
+
+===========================================================================
+  STEP 3: CONTROL NAMING — CRITICAL
+===========================================================================
+
+  The script reads values using form.GetInputValue('Control Name').
+  Control names MUST match EXACTLY (case-sensitive, including spaces):
+
+    "Chord Type"
+    "Voicing"
+    "Inversion"
+    "Velocity Scale"
+    "Humanize Spread"
+    "Strum Time (16ths)"
+    "Strum Tension"
+    "Snap to Scale"
+    "Keep Original Notes"
+    "Selected Notes Only"
+
+  In Control Surface:
+  - Right-click any control > Properties
+  - Set the "Caption" field to the exact name above
+  - This is what GetInputValue() reads
+
+===========================================================================
+  STEP 4: VISUAL DESIGN SUGGESTIONS
+===========================================================================
+
+  BACKGROUND:  Dark gray or black (#1a1a1a or similar)
+  ZONE BORDERS: Subtle lighter gray lines separating the three zones
+  LABELS:       White text, uppercase section headers:
+                "HARMONY"    "HUMANIZE"    "CONTEXT"
+
+  RECOMMENDED SIZES:
+  - Zone 1 (Harmony):   ~200px wide — stacked vertically
+  - Zone 2 (Humanize):  ~250px wide — X/Y pad takes most of the space
+  - Zone 3 (Context):   ~150px wide — compact toggles
+
+  TOTAL SIZE:           ~600 x 300 pixels works well
+
+  COLOR CODING (optional):
+  - Harmony knobs:  Blue accent
+  - Humanize knobs: Orange/amber accent
+  - Context knobs:  Green accent
+
+===========================================================================
+  STEP 5: TESTING
+===========================================================================
+
+  1. Save the .fst file to the piano roll scripts folder
+  2. Restart FL Studio
+  3. Open the piano roll > Tools > Scripts > Chord Stamper Pro
+  4. If the .fst loads, you'll see your custom GUI
+  5. If not (wrong path, old FL version), you'll see the standard dialog
+
+  To test which mode loaded:
+  - Custom GUI = your visual layout with the X/Y pad
+  - Standard dialog = the text-based vertical knob list
+
+===========================================================================
+  TROUBLESHOOTING
+===========================================================================
+
+  "I see the standard dialog, not my custom GUI"
+  - Verify FL Studio version is 24.1.0 or later
+  - Verify the .fst file is named exactly "Chord Stamper Pro.fst"
+  - Verify the .fst is in the piano roll scripts folder
+  - Try: Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  "Controls don't respond / wrong values"
+  - Right-click control > Properties > check the Caption matches exactly
+  - Check the min/max ranges match the table above
+  - Integer knob indices for mode selection must start at 0
+
+  "X/Y pad only gives one value"
+  - X/Y pads in Control Surface expose two named parameters
+  - Name the X-axis "Strum Time (16ths)" and Y-axis "Strum Tension"
+  - Some versions may require two separate controls instead
+
+===========================================================================

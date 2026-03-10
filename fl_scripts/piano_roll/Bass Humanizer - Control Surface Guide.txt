@@ -1,0 +1,208 @@
+===========================================================================
+  BASS HUMANIZER PRO — Control Surface (.fst) Build Guide
+===========================================================================
+
+  This guide tells you exactly how to build the custom GUI in FL Studio's
+  Control Surface plugin. When done, the script auto-detects and uses it.
+  If the .fst file is missing, the script falls back to the standard dialog.
+
+  REQUIREMENTS: FL Studio 24.1.0 or later (LoadSurface API)
+
+===========================================================================
+  STEP 1: CREATE THE CONTROL SURFACE PRESET
+===========================================================================
+
+  1. Open FL Studio
+  2. Add a new "Control Surface" plugin instance (Add > More Plugins)
+  3. Right-click the Control Surface title bar > choose a dark background
+  4. Build the layout described below using drag-and-drop controls
+  5. When done: Presets menu > "Save preset as..." >
+     Save as: "Bass Humanizer.fst"
+  6. Copy the .fst file to your piano roll scripts folder:
+     Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  The script looks for a file named exactly: "Bass Humanizer.fst"
+
+===========================================================================
+  STEP 2: LAYOUT — THREE ZONES
+===========================================================================
+
+  Arrange the GUI into three rectangular zones, left to right:
+
+  +---------------------+---------------------+------------------+
+  |  ZONE 1: FEEL &     |  ZONE 2: TIMBRAL    |  ZONE 3: MONO   |
+  |  GROOVE             |  DYNAMICS            |  & OPTIONS      |
+  +---------------------+---------------------+------------------+
+
+---------------------------------------------------------------------------
+  ZONE 1: FEEL & GROOVE (left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)        | Range / Options       | Default
+  ------------------|---------------------|-----------------------|--------
+  Knob (integer)    | Feel                | 0 to 7 (8 feel modes) | 0
+  Knob              | Timing Amount       | 0.00 to 1.00          | 0.30
+  Knob              | Velocity Amount     | 0.00 to 1.00          | 0.25
+  Knob              | Length Amount        | 0.00 to 1.00          | 0.15
+  Knob              | Swing               | 0.00 to 0.70          | 0.00
+  Knob              | Beat Accent         | 0.00 to 0.50          | 0.15
+
+  FEEL MODE VALUES (for labeling your value list):
+    0 = Subtle Feel
+    1 = Funk Pocket (behind beat)
+    2 = Driving Push (ahead of beat)
+    3 = Swing
+    4 = Laid Back
+    5 = Aggressive
+    6 = Finger Bass (muted)
+    7 = Slap Bass
+
+  VISUAL TIP: Stack the Feel knob at the top, then arrange the five
+  knobs in a 3+2 or 2+3 grid below it.
+
+---------------------------------------------------------------------------
+  ZONE 2: TIMBRAL DYNAMICS (center panel) — THE STAR FEATURE
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)           | Range          | Default
+  ------------------|------------------------|----------------|--------
+  Knob              | Filter Mod             | 0.00 to 1.00  | 0.00
+  Knob              | Pitch Drift            | 0.00 to 1.00  | 0.00
+  Knob              | Ghost Amount           | 0.00 to 1.00  | 0.50
+
+  FILTER MOD:
+  - Maps note velocity to filter cutoff (fcut) exponentially
+  - 0.0 = no filter modulation (fcut unchanged)
+  - 1.0 = full modulation — hard hits open the filter, soft notes muffled
+  - This is the key to making programmed bass sound alive
+
+  PITCH DRIFT:
+  - Adds micro-tuning variation via pitchofs
+  - High velocity notes drift slightly sharp (digging in)
+  - Normal velocity notes get subtle Gaussian pitch wandering
+  - 0.0 = perfectly in tune, 1.0 = noticeable drift
+
+  GHOST AMOUNT:
+  - Controls how aggressively ghost notes are treated
+  - Only affects notes with Color 1 set in the piano roll
+  - Ghost notes get: shorter length, lower velocity, crushed filter
+  - Set note color to 1 in the piano roll to mark ghost notes
+
+  VISUAL TIP: Make these three knobs large — they're the most impactful
+  timbral controls. Add a label "TIMBRAL" above this zone.
+
+---------------------------------------------------------------------------
+  ZONE 3: MONO & OPTIONS (right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)           | Range / Options | Default
+  ------------------|------------------------|-----------------|--------
+  CheckBox          | Mono Mode              | 0 or 1          | 1 (on)
+  Knob (integer)    | Legato Gap             | 0 to 50         | 10
+  CheckBox          | Selected Notes Only    | 0 or 1          | 1 (on)
+
+  MONO MODE:
+  - Prevents overlapping notes (essential for bass)
+  - When ON, each note is truncated before the next one starts
+  - Creates clean monophonic bass lines
+
+  LEGATO GAP:
+  - Ticks of silence between consecutive notes in mono mode
+  - 0 = notes butt up against each other (full legato)
+  - 10 = slight gap for natural finger release
+  - 50 = noticeable staccato gap between notes
+
+===========================================================================
+  STEP 3: CONTROL NAMING — CRITICAL
+===========================================================================
+
+  The script reads values using form.GetInputValue('Control Name').
+  Control names MUST match EXACTLY (case-sensitive, including spaces):
+
+    "Feel"
+    "Timing Amount"
+    "Velocity Amount"
+    "Length Amount"
+    "Swing"
+    "Beat Accent"
+    "Filter Mod"
+    "Pitch Drift"
+    "Ghost Amount"
+    "Mono Mode"
+    "Legato Gap"
+    "Selected Notes Only"
+
+  In Control Surface:
+  - Right-click any control > Properties
+  - Set the "Caption" field to the exact name above
+  - This is what GetInputValue() reads
+
+===========================================================================
+  STEP 4: VISUAL DESIGN SUGGESTIONS
+===========================================================================
+
+  BACKGROUND:  Dark gray or black (#1a1a1a or similar)
+  ZONE BORDERS: Subtle lighter gray lines separating the three zones
+  LABELS:       White text, uppercase section headers:
+                "FEEL & GROOVE"    "TIMBRAL"    "MONO & OPTIONS"
+
+  RECOMMENDED SIZES:
+  - Zone 1 (Feel & Groove): ~220px wide — combo + 5 knobs
+  - Zone 2 (Timbral):       ~200px wide — 3 large knobs
+  - Zone 3 (Mono/Options):  ~150px wide — compact toggles + 1 knob
+
+  TOTAL SIZE:               ~570 x 300 pixels works well
+
+  COLOR CODING (optional):
+  - Feel & Groove knobs:  Blue accent
+  - Timbral knobs:        Orange/amber accent (matches warmth theme)
+  - Mono/Options:         Green accent
+
+===========================================================================
+  STEP 5: TESTING
+===========================================================================
+
+  1. Save the .fst file to the piano roll scripts folder
+  2. Restart FL Studio
+  3. Open the piano roll > Tools > Scripts > Bass Humanizer
+  4. If the .fst loads, you'll see your custom GUI
+  5. If not (wrong path, old FL version), you'll see the standard dialog
+
+  To test which mode loaded:
+  - Custom GUI = your visual layout with large timbral knobs
+  - Standard dialog = the text-based vertical knob list
+
+  TESTING THE FEATURES:
+  - Draw a simple bass line (8 quarter notes)
+  - Try each Feel mode with Timing Amount at 0.3
+  - Turn up Filter Mod to 0.5 — check fcut values change per velocity
+  - Turn up Pitch Drift to 0.3 — check pitchofs varies per note
+  - Set some notes to Color 1, enable Ghost Amount — they should shorten
+  - Enable Mono Mode — overlapping notes should be truncated
+
+===========================================================================
+  TROUBLESHOOTING
+===========================================================================
+
+  "I see the standard dialog, not my custom GUI"
+  - Verify FL Studio version is 24.1.0 or later
+  - Verify the .fst file is named exactly "Bass Humanizer.fst"
+  - Verify the .fst is in the piano roll scripts folder
+  - Try: Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  "Controls don't respond / wrong values"
+  - Right-click control > Properties > check the Caption matches exactly
+  - Check the min/max ranges match the table above
+  - Integer knob indices for mode selection must start at 0
+
+  "Ghost notes aren't working"
+  - Make sure the notes have Color 1 set (right-click note > Set color)
+  - Ghost Amount must be > 0
+  - Color 0 is the default — only Color 1 triggers ghost treatment
+
+  "Notes still overlap with Mono Mode on"
+  - Check that Mono Mode toggle is ON (value = 1)
+  - Legato Gap of 0 means notes touch but don't overlap
+  - Increase Legato Gap for visible separation
+
+===========================================================================

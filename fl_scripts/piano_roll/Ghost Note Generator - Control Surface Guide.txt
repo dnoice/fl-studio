@@ -1,0 +1,241 @@
+===========================================================================
+  GHOST NOTE GENERATOR PRO — Control Surface (.fst) Build Guide
+===========================================================================
+
+  This guide tells you exactly how to build the custom GUI in FL Studio's
+  Control Surface plugin. When done, the script auto-detects and uses it.
+  If the .fst file is missing, the script falls back to the standard dialog.
+
+  REQUIREMENTS: FL Studio 24.1.0 or later (LoadSurface API)
+
+===========================================================================
+  STEP 1: CREATE THE CONTROL SURFACE PRESET
+===========================================================================
+
+  1. Open FL Studio
+  2. Add a new "Control Surface" plugin instance (Add > More Plugins)
+  3. Right-click the Control Surface title bar > choose a dark background
+  4. Build the layout described below using drag-and-drop controls
+  5. When done: Presets menu > "Save preset as..." >
+     Save as: "Ghost Note Generator.fst"
+  6. Copy the .fst file to your piano roll scripts folder:
+     Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  The script looks for a file named exactly: "Ghost Note Generator.fst"
+
+===========================================================================
+  STEP 2: LAYOUT — THREE ZONES
+===========================================================================
+
+  +---------------------+---------------------+------------------+
+  |  ZONE 1: PLACEMENT  |  ZONE 2: DYNAMICS   |  ZONE 3: OPTIONS |
+  |  & PITCH            |  & HUMANIZE          |  & ROUTING       |
+  +---------------------+---------------------+------------------+
+
+---------------------------------------------------------------------------
+  ZONE 1: PLACEMENT & PITCH (left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)          | Range / Options       | Default
+  ------------------|---------------------- |---------------------- |--------
+  Knob (integer)  | Placement             | 0-7 (8 placement modes) | 1
+  Knob (integer) | Euclidean Pulses      | 1 to 16               | 3
+  Knob (integer)  | Pitch Mode            | 0-3 (4 pitch modes)   | 0
+  Knob (integer) | Fixed Note (C5=60)    | 0 to 131              | 60
+
+  PLACEMENT VALUES:
+    0 = Eighth Notes
+    1 = Sixteenth Notes
+    2 = Triplets
+    3 = Between Notes Only
+    4 = Offbeat Only
+    5 = Syncopated
+    6 = Random Scatter
+    7 = Euclidean
+
+  EUCLIDEAN PULSES:
+  - Only used when Placement = "Euclidean" (mode 7)
+  - Specifies the number of onsets (k) to distribute across available
+    time slots (n) using Bjorklund's algorithm
+  - E(3, 8) = tresillo/habanera rhythm
+  - E(5, 16) = bossa nova necklace
+  - E(4, 12) = 12/8 fandango shuffle
+  - Density control is ignored in Euclidean mode (algorithm handles it)
+
+  PITCH MODE VALUES:
+    0 = Same as Source
+    1 = Alternating Octave Down
+    2 = Random Nearby (diatonic) — uses piano roll scale highlighting
+    3 = Fixed Note (set below)
+
+  DIATONIC PITCH:
+  - When "Random Nearby (diatonic)" is selected, the script reads your
+    piano roll's scale highlighting (Helpers > Scale highlighting)
+  - Offsets pitch by scale DEGREES, not chromatic semitones
+  - Example in C minor: D offset by +2 degrees → F (not F#)
+  - If no scale is set, falls back to chromatic offsets
+
+---------------------------------------------------------------------------
+  ZONE 2: DYNAMICS & HUMANIZE (center panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)          | Range          | Default
+  ------------------|---------------------- |----------------|--------
+  Knob       | Velocity (%)          | 0.05 to 0.80  | 0.35
+  Knob       | Length (%)            | 0.10 to 1.00  | 0.50
+  Knob       | Density (%)           | 0.10 to 1.00  | 0.75
+  Knob       | Humanize              | 0.00 to 1.00  | 0.25
+
+  VELOCITY (%):
+  - Base velocity multiplier relative to source note
+  - Ghost notes also get proximity-based crescendo: notes approaching
+    the next accent are automatically boosted up to ~15%
+  - This simulates a drummer lifting the stick before a downbeat
+
+  LENGTH (%):
+  - Ghost note length as a percentage of the grid step
+  - 0.10 = very short staccato ghosts
+  - 1.00 = ghosts fill the full grid step
+
+  DENSITY (%):
+  - Probability that each candidate position gets a ghost note
+  - 0.10 = sparse, occasional ghosts
+  - 1.00 = every possible position gets a ghost
+  - Ignored in Euclidean mode (pulse count handles distribution)
+
+  HUMANIZE:
+  - Controls Gaussian micro-timing jitter and velocity variation
+  - 0.00 = perfectly quantized, uniform velocity
+  - Uses Box-Muller Gaussian distribution: most ghosts cluster
+    tightly around the grid, with rare outliers further away
+  - Much more natural than uniform random scatter
+
+---------------------------------------------------------------------------
+  ZONE 3: OPTIONS & ROUTING (right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)          | Range / Options | Default
+  ------------------|---------------------- |-----------------|--------
+  Knob (integer)  | Ghost Color           | 0-16 (17 opts)  | 0
+  CheckBox     | Avoid Existing Notes  | 0 or 1          | 1 (on)
+  CheckBox     | Selected Notes Only   | 0 or 1          | 1 (on)
+
+  GHOST COLOR VALUES:
+    0 = Same as Source (inherits color from reference note)
+    1-16 = Color 1 through Color 16
+
+  TIP: Use Ghost Color to route ghost notes to a separate MIDI channel.
+  E.g., Color 1 = main snare hits, Color 2 = ghost snare with heavy
+  filtering for a softer, more muted ghost layer sound.
+
+  AVOID EXISTING NOTES:
+  - When ON: uses bounding-box collision detection to prevent overlapping
+    ghost notes with any existing note at the same pitch
+  - Prevents voice stealing, CPU spikes, and envelope double-triggering
+  - Also prevents ghost-on-ghost overlaps (self-collision detection)
+
+  SELECTED NOTES ONLY:
+  - When ON: only processes selected notes as source material
+  - Unselected notes are left completely untouched
+  - Generated ghosts are automatically selected for easy editing
+
+===========================================================================
+  STEP 3: CONTROL NAMING — CRITICAL
+===========================================================================
+
+  Control names MUST match EXACTLY (case-sensitive, including spaces):
+
+    "Placement"
+    "Euclidean Pulses"
+    "Pitch Mode"
+    "Fixed Note (C5=60)"
+    "Velocity (%)"
+    "Length (%)"
+    "Density (%)"
+    "Humanize"
+    "Ghost Color"
+    "Avoid Existing Notes"
+    "Selected Notes Only"
+
+===========================================================================
+  STEP 4: VISUAL DESIGN SUGGESTIONS
+===========================================================================
+
+  BACKGROUND:  Dark gray or black (#1a1a1a)
+  LABELS:       "PLACEMENT"    "DYNAMICS"    "OPTIONS"
+  TOTAL SIZE:   ~600 x 300 pixels
+
+  COLOR CODING (optional):
+  - Placement controls:   Blue accent
+  - Dynamics/Humanize:    Orange/amber accent
+  - Options/Routing:      Green accent
+
+===========================================================================
+  STEP 5: TESTING
+===========================================================================
+
+  EUCLIDEAN TEST:
+  - Draw a kick on beat 1 and a snare on beat 3 (2-beat gap)
+  - Set Placement = Euclidean, Pulses = 3
+  - Run: should get 3 evenly spaced ghosts (tresillo pattern)
+  - Try Pulses = 5 for a denser, bossa-nova-like fill
+
+  DIATONIC PITCH TEST:
+  - Set scale to C Natural Minor in Helpers > Scale highlighting
+  - Draw a D note, set Pitch Mode = "Random Nearby (diatonic)"
+  - Run multiple times: generated ghosts should only land on
+    C, Eb, F (never C#, D#, or other out-of-scale notes)
+
+  COLLISION TEST:
+  - Draw a long sustained note (4+ bars) on C3
+  - Run ghost generator — no ghosts should overlap the sustained note
+  - No memory spike or slowdown (bounding-box is efficient)
+
+  VELOCITY PHRASING TEST:
+  - Draw two hits with a large gap (2 beats)
+  - Generate ghosts in the gap
+  - Last ghost before the second hit should be noticeably louder
+    than the first ghost after the first hit (crescendo toward accent)
+
+  NON-DESTRUCTIVE TEST:
+  - Have some unselected notes in the piano roll
+  - Run with "Selected Notes Only" ON
+  - Unselected notes must remain completely untouched
+  - Generated ghosts should appear selected (highlighted)
+
+  SLIDE/PORTA SAFETY TEST:
+  - Create a slide note (808 glide) as a source note
+  - Generate ghosts — ghosts must NOT slide or glide
+  - They should be static, percussive pulses
+
+===========================================================================
+  TROUBLESHOOTING
+===========================================================================
+
+  "Ghosts sound out of key"
+  - Use "Random Nearby (diatonic)" pitch mode
+  - Make sure scale highlighting is set in the piano roll
+    (Helpers > Scale highlighting)
+  - Without a scale set, the script falls back to chromatic offsets
+
+  "Euclidean mode produces wrong number of ghosts"
+  - Euclidean distributes pulses across AVAILABLE slots in each gap
+  - If the gap is too short, fewer slots are available
+  - Pulses are capped at the number of available slots
+
+  "Ghost notes are triggering slide/portamento"
+  - This should not happen with the Pro version
+  - The script explicitly sets slide=False and porta=False
+  - If still occurring, check if the synth plugin has auto-glide
+
+  "Timing feels too robotic even with Humanize"
+  - Increase Humanize toward 0.50-0.75
+  - The Gaussian distribution keeps most notes near the grid
+    but allows occasional wider deviations for organic feel
+
+  "Too many ghosts / cluttered"
+  - Lower the Density (%) to 0.30-0.50
+  - Or switch to Euclidean mode with fewer Pulses (2-3)
+  - Euclidean gives more controlled, musical distribution
+
+===========================================================================

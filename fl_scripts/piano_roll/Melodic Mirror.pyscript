@@ -1,0 +1,457 @@
+"""Melodic Mirror 2.0 — Reverse, invert, and transform melodic patterns.
+
+Classic compositional tools used in counterpoint, serialism, and modern
+production. Features preview-safe idempotence, correct palindrome math,
+chord-aware event grouping, diatonic scale-aware inversion, and full
+note property preservation.
+
+Enhanced from audit recommendations for musically correct transformations.
+"""
+
+import flpianoroll as flp
+
+PITCH_MIN = 0
+PITCH_MAX = 131
+
+TRANSFORM_MODES = [
+    'Retrograde (reverse time)',
+    'Inversion (chromatic)',
+    'Retrograde Inversion (both)',
+    'Diatonic Inversion (scale-aware)',
+    'Time Palindrome (append reverse)',
+    'Pitch Palindrome (append inversion)',
+    'Rotation (shift event order)',
+    'Contrary Motion (add inverted voice)',
+]
+
+AXIS_MODES = [
+    'Auto (center of range)',
+    'Middle C (C5 = 60)',
+    'Lowest Note',
+    'Highest Note',
+    'Custom (set below)',
+]
+
+WINDOW_MODES = [
+    'Note Span (min start to max end)',
+    'Timeline Selection (if present)',
+]
+
+
+# ---------------------------------------------------------------------------
+# Preview-safe snapshot — captured once in createDialog()
+# ---------------------------------------------------------------------------
+_BASE_NOTES = []
+_BASE_TIMELINE = (-1, -1)
+
+
+# ---------------------------------------------------------------------------
+# Scale helper for diatonic inversion
+# ---------------------------------------------------------------------------
+def _parse_scale_bitmask():
+    """Parse the C-aligned scale bitmask from the piano roll.
+
+    Returns a list of 12 ints where 0 = in scale, 1 = out of scale.
+    Returns None if no scale is set.
+    """
+    try:
+        helper = flp.score.snap_scale_helper
+        if not helper or helper.strip() == '':
+            return None
+        bits = [int(x.strip()) for x in helper.split(',')]
+        if len(bits) != 12:
+            return None
+        if 1 not in bits:
+            return None
+        return bits
+    except Exception:
+        return None
+
+
+def _snap_to_scale(pitch, scale_bits):
+    """Snap a pitch to the nearest in-scale note."""
+    if scale_bits is None:
+        return pitch
+    pc = pitch % 12
+    if scale_bits[pc] == 0:
+        return pitch  # Already in scale
+
+    # Search both directions for nearest in-scale note
+    for offset in range(1, 7):
+        up = pitch + offset
+        down = pitch - offset
+        up_ok = up <= PITCH_MAX and scale_bits[up % 12] == 0
+        down_ok = down >= PITCH_MIN and scale_bits[down % 12] == 0
+        if up_ok and down_ok:
+            return down  # Tie: prefer down
+        if down_ok:
+            return down
+        if up_ok:
+            return up
+    return pitch
+
+
+# ---------------------------------------------------------------------------
+# Pitch helpers
+# ---------------------------------------------------------------------------
+def _clamp_pitch(p):
+    """Clamp to FL Studio's 0-131 range."""
+    return max(PITCH_MIN, min(PITCH_MAX, int(round(p))))
+
+
+def _invert_pitch(pitch, axis):
+    """Chromatic inversion around axis."""
+    return _clamp_pitch(2.0 * axis - float(pitch))
+
+
+def _invert_pitch_diatonic(pitch, axis, scale_bits):
+    """Invert chromatically, then snap to scale."""
+    inverted = _clamp_pitch(2.0 * axis - float(pitch))
+    if scale_bits is not None:
+        inverted = _snap_to_scale(inverted, scale_bits)
+    return inverted
+
+
+# ---------------------------------------------------------------------------
+# Clone helper — full property preservation with try/except
+# ---------------------------------------------------------------------------
+def _clone_note(src, pitch=None, time=None, length=None):
+    """Create a full copy of a Note with optional overrides.
+
+    Tries Note.clone() first (confirmed available in FL Studio API),
+    falls back to manual property copy.
+    """
+    try:
+        n = src.clone()
+        if pitch is not None:
+            n.number = pitch
+        if time is not None:
+            n.time = time
+        if length is not None:
+            n.length = length
+        return n
+    except Exception:
+        pass
+
+    # Fallback: manual copy
+    n = flp.Note()
+    n.number = pitch if pitch is not None else src.number
+    n.time = time if time is not None else src.time
+    n.length = length if length is not None else src.length
+    n.velocity = src.velocity
+    n.color = src.color
+    n.pan = src.pan
+    n.fcut = src.fcut
+    n.fres = src.fres
+    n.group = src.group
+    for attr in ('pitchofs', 'slide', 'porta', 'muted', 'release',
+                 'repeats', 'selected'):
+        try:
+            setattr(n, attr, getattr(src, attr))
+        except Exception:
+            pass
+    return n
+
+
+# ---------------------------------------------------------------------------
+# Window helpers
+# ---------------------------------------------------------------------------
+def _window_from_notes(notes):
+    """Get time window from note span."""
+    w0 = min(n.time for n in notes)
+    w1 = max(n.time + max(1, n.length) for n in notes)
+    return (w0, w1)
+
+
+def _window_from_timeline_or_notes(notes, window_mode):
+    """Get time window: note span or timeline selection."""
+    w0_notes, w1_notes = _window_from_notes(notes)
+    if window_mode == 1:
+        t0, t1 = _BASE_TIMELINE
+        if t0 >= 0 and t1 > t0:
+            return (t0, t1)
+    return (w0_notes, w1_notes)
+
+
+# ---------------------------------------------------------------------------
+# Event grouping for chord-aware transforms
+# ---------------------------------------------------------------------------
+def _group_by_start_time(notes):
+    """Group notes by start time into chord events.
+
+    Returns (times_list, events_list) where each event is a list of notes
+    at the same start time, sorted by pitch.
+    """
+    buckets = {}
+    for n in notes:
+        buckets.setdefault(n.time, []).append(n)
+    times = sorted(buckets.keys())
+    events = [sorted(buckets[t], key=lambda x: x.number) for t in times]
+    return times, events
+
+
+# ---------------------------------------------------------------------------
+# Control Surface .fst support
+# ---------------------------------------------------------------------------
+_FST_FILE = 'Melodic Mirror.fst'
+
+
+def _try_load_surface():
+    """Attempt to load the Control Surface .fst GUI."""
+    try:
+        form = flp.LoadSurface(_FST_FILE)
+        if form is not None:
+            return form
+    except Exception:
+        pass
+    return None
+
+
+def _build_standard_dialog():
+    """Build the standard ScriptDialog fallback UI."""
+    form = flp.ScriptDialog(
+        'Melodic Mirror 2.0',
+        'Transforms melodies using classical composition techniques.\r\n\r\n'
+        'Retrograde: Reverses note order in time.\r\n'
+        'Inversion: Flips pitches around an axis (chromatic).\r\n'
+        'Diatonic Inversion: Scale-aware pitch flip (uses scale highlighting).\r\n'
+        'Palindrome: Appends reversed/inverted copy after the original.\r\n'
+        'Rotation: Shifts pitch sequence across time positions.\r\n'
+        'Contrary Motion: Adds inverted countervoice (two voices moving\r\n'
+        'in opposite directions).\r\n\r\n'
+        'Preview-safe: results do not compound when tweaking controls.'
+    )
+    # --- Transform ---
+    form.AddInputCombo('Transform', TRANSFORM_MODES, 0)
+    form.AddInputCombo('Pitch Axis', AXIS_MODES, 0)
+    form.AddInputKnobInt('Custom Axis Note', 60, PITCH_MIN, PITCH_MAX)
+    # --- Window ---
+    form.AddInputCombo('Time Window', WINDOW_MODES, 0)
+    form.AddInputKnobInt('Append Gap (ticks)', 0, 0, 16 * flp.score.PPQ)
+    # --- Options ---
+    form.AddInputKnobInt('Rotation Steps', 1, 0, 64)
+    form.AddInputCheckbox('Preserve Rhythm', False)
+    form.AddInputCheckbox('Chord-Aware', True)
+    form.AddInputCheckbox('Ungroup Generated', True)
+    form.AddInputCheckbox('Remove Duplicates', True)
+    return form
+
+
+def createDialog():
+    """Capture snapshot and build UI."""
+    global _BASE_NOTES, _BASE_TIMELINE
+
+    # Snapshot ALL notes once — preview-safe idempotence
+    _BASE_NOTES = []
+    for i in range(flp.score.noteCount):
+        _BASE_NOTES.append(_clone_note(flp.score.getNote(i)))
+
+    # Capture timeline selection for window mode
+    try:
+        _BASE_TIMELINE = flp.score.getTimelineSelection()
+    except Exception:
+        _BASE_TIMELINE = (-1, -1)
+
+    form = _try_load_surface()
+    if form is not None:
+        return form
+    return _build_standard_dialog()
+
+
+# ---------------------------------------------------------------------------
+# Apply — preview-safe, property-preserving, musically correct
+# ---------------------------------------------------------------------------
+def apply(form):
+    global _BASE_NOTES
+
+    if not _BASE_NOTES:
+        return
+
+    transform = int(form.GetInputValue('Transform'))
+    axis_mode = int(form.GetInputValue('Pitch Axis'))
+    custom_axis = int(form.GetInputValue('Custom Axis Note'))
+    window_mode = int(form.GetInputValue('Time Window'))
+    append_gap = int(form.GetInputValue('Append Gap (ticks)'))
+    rotation_steps = int(form.GetInputValue('Rotation Steps'))
+    preserve_rhythm = bool(form.GetInputValue('Preserve Rhythm'))
+    chord_aware = bool(form.GetInputValue('Chord-Aware'))
+    ungroup_gen = bool(form.GetInputValue('Ungroup Generated'))
+    dedupe = bool(form.GetInputValue('Remove Duplicates'))
+
+    # Work from snapshot clones — never mutate the snapshot itself
+    base = [_clone_note(n) for n in _BASE_NOTES]
+    base.sort(key=lambda n: (n.time, n.number))
+
+    if not base:
+        return
+
+    # Determine pitch axis
+    pitches = [n.number for n in base]
+    min_pitch = min(pitches)
+    max_pitch = max(pitches)
+
+    if axis_mode == 0:      # Auto center
+        axis = (min_pitch + max_pitch) / 2.0
+    elif axis_mode == 1:    # Middle C
+        axis = 60.0
+    elif axis_mode == 2:    # Lowest
+        axis = float(min_pitch)
+    elif axis_mode == 3:    # Highest
+        axis = float(max_pitch)
+    elif axis_mode == 4:    # Custom
+        axis = float(custom_axis)
+    else:
+        axis = 60.0
+
+    # Time window for reflection/palindrome
+    W0, W1 = _window_from_timeline_or_notes(base, window_mode)
+    if W1 <= W0:
+        return
+
+    # Parse scale for diatonic inversion
+    scale_bits = _parse_scale_bitmask()
+
+    # --- Time reflection helper ---
+    def retro_time(note):
+        """Mirror note's time segment within window [W0, W1]."""
+        end = note.time + max(1, note.length)
+        return max(W0, W0 + W1 - end)
+
+    append_start = W1 + max(0, append_gap)
+
+    out = []
+
+    # --- Postprocess helper ---
+    def postprocess(n, is_generated=False):
+        if is_generated and ungroup_gen:
+            n.group = 0
+        return n
+
+    # =======================================================================
+    # Transform implementations
+    # =======================================================================
+
+    if transform == 0:  # Retrograde (reverse time)
+        if preserve_rhythm:
+            # Reverse pitch sequence, keep original times/lengths
+            if chord_aware:
+                times, events = _group_by_start_time(base)
+                n_events = len(events)
+                for i, tgt_event in enumerate(events):
+                    src_event = events[n_events - 1 - i]
+                    for j, tgt_note in enumerate(tgt_event):
+                        src_note = src_event[j % len(src_event)]
+                        tgt_note.number = src_note.number
+                        out.append(postprocess(tgt_note))
+            else:
+                rev_pitches = list(reversed([n.number for n in base]))
+                for i, n in enumerate(base):
+                    n.number = rev_pitches[i]
+                    out.append(postprocess(n))
+        else:
+            # Full time mirror
+            for n in base:
+                n.time = retro_time(n)
+                out.append(postprocess(n))
+
+    elif transform == 1:  # Inversion (chromatic)
+        for n in base:
+            n.number = _invert_pitch(n.number, axis)
+            out.append(postprocess(n))
+
+    elif transform == 2:  # Retrograde Inversion
+        for n in base:
+            n.time = retro_time(n)
+            n.number = _invert_pitch(n.number, axis)
+            out.append(postprocess(n))
+
+    elif transform == 3:  # Diatonic Inversion (scale-aware)
+        for n in base:
+            n.number = _invert_pitch_diatonic(n.number, axis, scale_bits)
+            out.append(postprocess(n))
+
+    elif transform == 4:  # Time Palindrome (append retrograde)
+        # Keep originals
+        for n in base:
+            out.append(postprocess(n))
+        # Append retrograde copy with correct math
+        for n in base:
+            nn = _clone_note(n)
+            rt = retro_time(nn)
+            nn.time = append_start + (rt - W0)
+            nn.length = max(1, nn.length)
+            out.append(postprocess(nn, is_generated=True))
+
+    elif transform == 5:  # Pitch Palindrome (append inversion)
+        # Keep originals
+        for n in base:
+            out.append(postprocess(n))
+        # Append inverted copy shifted after original
+        for n in base:
+            nn = _clone_note(n)
+            nn.time = append_start + (nn.time - W0)
+            nn.number = _invert_pitch(nn.number, axis)
+            out.append(postprocess(nn, is_generated=True))
+
+    elif transform == 6:  # Rotation (shift event order)
+        if chord_aware:
+            times, events = _group_by_start_time(base)
+            n_events = len(events)
+            if n_events == 0:
+                return
+            step = rotation_steps % n_events
+            for i, tgt_event in enumerate(events):
+                src_event = events[(i + step) % n_events]
+                for j, tgt_note in enumerate(tgt_event):
+                    src_note = src_event[j % len(src_event)]
+                    tgt_note.number = src_note.number
+                    out.append(postprocess(tgt_note))
+        else:
+            n_notes = len(base)
+            if n_notes == 0:
+                return
+            step = rotation_steps % n_notes
+            src_pitches = [n.number for n in base]
+            rotated = src_pitches[step:] + src_pitches[:step]
+            for i, n in enumerate(base):
+                n.number = rotated[i]
+                out.append(postprocess(n))
+
+    elif transform == 7:  # Contrary Motion (add inverted countervoice)
+        # Keep all originals
+        for n in base:
+            out.append(postprocess(n))
+        # Add inverted copy as countervoice
+        for n in base:
+            nn = _clone_note(n)
+            nn.number = _invert_pitch(nn.number, axis)
+            out.append(postprocess(nn, is_generated=True))
+
+    # --- Deduplication ---
+    if dedupe:
+        seen = set()
+        unique = []
+        for n in out:
+            # Key on core identity properties
+            try:
+                key = (
+                    int(n.time), int(max(1, n.length)), int(n.number),
+                    int(n.color), int(n.group),
+                )
+            except Exception:
+                key = (int(n.time), int(n.length), int(n.number))
+            if key not in seen:
+                seen.add(key)
+                unique.append(n)
+        out = unique
+
+    # --- Score commit ---
+    # Clear working set (selected notes, or all if nothing selected)
+    # then rewrite with transformed notes. Safe because we snapshot in
+    # createDialog, so we always have the original data.
+    flp.score.clearNotes()
+    for n in out:
+        n.length = max(1, int(n.length))
+        n.number = _clamp_pitch(n.number)
+        n.time = max(0, int(n.time))
+        flp.score.addNote(n)

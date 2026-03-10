@@ -1,0 +1,199 @@
+"""Fade Designer - Advanced fade shapes for Edison.
+
+Goes beyond simple linear fades with exponential, logarithmic,
+S-curve, cosine, and custom power curve shapes. Supports fade in,
+fade out, crossfade, and volume automation envelopes.
+"""
+
+from enveditor import *
+import math
+
+FADE_TYPES = [
+    'Fade In',
+    'Fade Out',
+    'Fade In + Out',
+    'Crossfade (center)',
+    'Volume Swell',
+    'Ducking Envelope',
+]
+
+CURVE_SHAPES = [
+    'Linear',
+    'Exponential (fast start)',
+    'Logarithmic (slow start)',
+    'S-Curve (smooth)',
+    'Cosine (natural)',
+    'Square Root (fast start, gentle end)',
+    'Inverse Square (slow start, fast end)',
+    'Stepped (quantized)',
+    'Custom Power (set exponent)',
+]
+
+
+def createDialog():
+    form = ScriptDialog(
+        'Fade Designer',
+        'Creates advanced fade shapes on the selection.\r\n\r\n'
+        'Fade In: Silence to full volume.\r\n'
+        'Fade Out: Full volume to silence.\r\n'
+        'Fade In+Out: Fade in then fade out symmetrically.\r\n'
+        'Crossfade: Dip in the middle (center of selection).\r\n'
+        'Volume Swell: Crescendo then hold.\r\n'
+        'Ducking: Quick dip and recovery (sidechain-style).\r\n\r\n'
+        'Curve Shape controls the acceleration of the fade.\r\n'
+        'Depth controls how much the volume is reduced at its lowest.'
+    )
+    form.AddInputCombo('Fade Type', FADE_TYPES, 0)
+    form.AddInputCombo('Curve Shape', CURVE_SHAPES, 4)
+    form.AddInputKnob('Depth (dB)', -96.0, -96.0, 0.0)
+    form.AddInputKnob('Power Exponent', 2.0, 0.1, 8.0)
+    form.AddInputKnobInt('Steps (for Stepped)', 8, 2, 64)
+    form.AddInputKnob('Fade In Length (%)', 0.50, 0.01, 1.00)
+    form.AddInputKnob('Fade Out Length (%)', 0.50, 0.01, 1.00)
+    form.AddInputKnob('Hold Level', 1.0, 0.0, 1.0)
+    return form
+
+
+def apply(form):
+    fade_type = int(form.GetInputValue('Fade Type'))
+    curve_shape = int(form.GetInputValue('Curve Shape'))
+    depth_db = form.GetInputValue('Depth (dB)')
+    power_exp = form.GetInputValue('Power Exponent')
+    num_steps = int(form.GetInputValue('Steps (for Stepped)'))
+    fade_in_pct = form.GetInputValue('Fade In Length (%)')
+    fade_out_pct = form.GetInputValue('Fade Out Length (%)')
+    hold_level = form.GetInputValue('Hold Level')
+
+    sample = EditorSample
+    sr = sample.SampleRate
+    length = sample.Length
+    num_channels = sample.NumChans
+
+    # Selection
+    sel_start = Editor.SelectionStartS
+    sel_end = Editor.SelectionEndS
+    if sel_start == sel_end:
+        sel_start = 0
+        sel_end = length
+
+    total = sel_end - sel_start
+    if total <= 0:
+        return
+
+    # Convert depth from dB to linear
+    if depth_db <= -96.0:
+        min_gain = 0.0
+    else:
+        min_gain = 10.0 ** (depth_db / 20.0)
+
+    # Process each sample
+    for pos in range(sel_start, sel_end):
+        # Normalized position 0..1
+        t = (pos - sel_start) / max(1, total - 1)
+
+        # Calculate the raw envelope value (0 = silent, 1 = full volume)
+        envelope = _calc_envelope(t, fade_type, fade_in_pct, fade_out_pct, hold_level)
+
+        # Apply curve shape to the envelope
+        shaped = _shape_curve(envelope, curve_shape, power_exp, num_steps)
+
+        # Scale between min_gain and 1.0
+        gain = min_gain + shaped * (1.0 - min_gain)
+
+        # Apply gain to all channels
+        for ch in range(num_channels):
+            val = sample.GetSampleAt(pos, ch)
+            sample.SetSampleAt(pos, ch, val * gain)
+
+        # Progress
+        if (pos - sel_start) % 10000 == 0:
+            Utils.ProgressMsg('Fade Designer...', pos - sel_start, total)
+
+
+def _calc_envelope(t, fade_type, fade_in_pct, fade_out_pct, hold_level):
+    """Calculate the raw envelope value at position t (0..1)."""
+
+    if fade_type == 0:    # Fade In
+        return t
+
+    elif fade_type == 1:  # Fade Out
+        return 1.0 - t
+
+    elif fade_type == 2:  # Fade In + Out
+        # Symmetrical: fade in for first half, fade out for second half
+        fade_in_end = fade_in_pct
+        fade_out_start = 1.0 - fade_out_pct
+
+        if t < fade_in_end:
+            return t / fade_in_end if fade_in_end > 0 else 1.0
+        elif t > fade_out_start:
+            return (1.0 - t) / fade_out_pct if fade_out_pct > 0 else 1.0
+        else:
+            return 1.0
+
+    elif fade_type == 3:  # Crossfade (dip in center)
+        # Full volume at edges, dip to hold_level in the middle
+        center_dist = abs(t - 0.5) * 2.0  # 0 at center, 1 at edges
+        return hold_level + center_dist * (1.0 - hold_level)
+
+    elif fade_type == 4:  # Volume Swell
+        # Quick fade in, then hold
+        if t < fade_in_pct:
+            return t / fade_in_pct if fade_in_pct > 0 else 1.0
+        else:
+            return hold_level
+
+    elif fade_type == 5:  # Ducking Envelope
+        # Quick dip and recovery (sidechain-style pump)
+        # Attack: fast dip in first 10%
+        # Release: slow recovery over the rest
+        attack_pct = 0.10
+        if t < attack_pct:
+            # Fast duck down
+            duck_t = t / attack_pct
+            return 1.0 - duck_t * (1.0 - hold_level)
+        else:
+            # Slow recovery
+            release_t = (t - attack_pct) / (1.0 - attack_pct)
+            return hold_level + release_t * (1.0 - hold_level)
+
+    return 1.0
+
+
+def _shape_curve(value, curve_shape, power_exp, num_steps):
+    """Apply a curve shape to a 0..1 value."""
+    # Clamp input
+    v = max(0.0, min(1.0, value))
+
+    if curve_shape == 0:    # Linear
+        return v
+
+    elif curve_shape == 1:  # Exponential (fast start)
+        return 1.0 - (1.0 - v) ** 2
+
+    elif curve_shape == 2:  # Logarithmic (slow start)
+        return v ** 2
+
+    elif curve_shape == 3:  # S-Curve
+        # Hermite-style smooth step
+        return v * v * (3.0 - 2.0 * v)
+
+    elif curve_shape == 4:  # Cosine
+        return (1.0 - math.cos(v * math.pi)) * 0.5
+
+    elif curve_shape == 5:  # Square Root (fast start, gentle end)
+        return math.sqrt(v)
+
+    elif curve_shape == 6:  # Inverse Square (slow start, fast end)
+        return v * v
+
+    elif curve_shape == 7:  # Stepped (quantized)
+        if num_steps <= 1:
+            return v
+        step = math.floor(v * num_steps) / num_steps
+        return min(1.0, step)
+
+    elif curve_shape == 8:  # Custom Power
+        return v ** power_exp
+
+    return v

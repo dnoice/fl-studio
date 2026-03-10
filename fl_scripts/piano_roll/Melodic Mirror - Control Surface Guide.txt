@@ -1,0 +1,251 @@
+===========================================================================
+  MELODIC MIRROR 2.0 — Control Surface (.fst) Build Guide
+===========================================================================
+
+  This guide tells you exactly how to build the custom GUI in FL Studio's
+  Control Surface plugin. When done, the script auto-detects and uses it.
+  If the .fst file is missing, the script falls back to the standard dialog.
+
+  REQUIREMENTS: FL Studio 24.1.0 or later (LoadSurface API)
+
+===========================================================================
+  STEP 1: CREATE THE CONTROL SURFACE PRESET
+===========================================================================
+
+  1. Open FL Studio
+  2. Add a new "Control Surface" plugin instance (Add > More Plugins)
+  3. Right-click the Control Surface title bar > choose a dark background
+  4. Build the layout described below using drag-and-drop controls
+  5. When done: Presets menu > "Save preset as..." >
+     Save as: "Melodic Mirror.fst"
+  6. Copy the .fst file to your piano roll scripts folder:
+     Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  The script looks for a file named exactly: "Melodic Mirror.fst"
+
+===========================================================================
+  STEP 2: LAYOUT — THREE ZONES
+===========================================================================
+
+  +---------------------+---------------------+------------------+
+  |  ZONE 1: TRANSFORM  |  ZONE 2: WINDOW     |  ZONE 3: OPTIONS |
+  |  & AXIS             |  & TIMING            |  & BEHAVIOR      |
+  +---------------------+---------------------+------------------+
+
+---------------------------------------------------------------------------
+  ZONE 1: TRANSFORM & AXIS (left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)         | Range / Options        | Default
+  ------------------|----------------------|------------------------|--------
+  Knob (integer)  | Transform            | 0-7 (8 transform modes)| 0
+  Knob (integer)  | Pitch Axis           | 0-4 (5 axis modes)     | 0
+  Knob (integer) | Custom Axis Note     | 0 to 131               | 60
+
+  TRANSFORM VALUES:
+    0 = Retrograde (reverse time)
+    1 = Inversion (chromatic)
+    2 = Retrograde Inversion (both)
+    3 = Diatonic Inversion (scale-aware)
+    4 = Time Palindrome (append reverse)
+    5 = Pitch Palindrome (append inversion)
+    6 = Rotation (shift event order)
+    7 = Contrary Motion (add inverted voice)
+
+  PITCH AXIS VALUES:
+    0 = Auto (center of pitch range)
+    1 = Middle C (C5 = note 60)
+    2 = Lowest Note
+    3 = Highest Note
+    4 = Custom (use knob below)
+
+---------------------------------------------------------------------------
+  ZONE 2: WINDOW & TIMING (center panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)            | Range          | Default
+  ------------------|-------------------------|----------------|--------
+  Knob (integer)  | Time Window             | 0-1 (2 modes)  | 0
+  Knob (integer) | Append Gap (ticks)      | 0 to PPQ*16    | 0
+  Knob (integer) | Rotation Steps          | 0 to 64        | 1
+
+  TIME WINDOW VALUES:
+    0 = Note Span (min start to max end)
+    1 = Timeline Selection (if present — falls back to note span)
+
+  APPEND GAP:
+  - Gap in ticks between original and appended copy
+  - Only affects Time Palindrome, Pitch Palindrome, and Contrary Motion
+  - 0 = seamless append, PPQ = one quarter note gap
+
+  ROTATION STEPS:
+  - Number of positions to rotate the pitch/event sequence
+  - Only affects Rotation mode (transform 6)
+
+---------------------------------------------------------------------------
+  ZONE 3: OPTIONS & BEHAVIOR (right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)            | Range          | Default
+  ------------------|-------------------------|----------------|--------
+  CheckBox     | Preserve Rhythm         | 0 or 1         | 0 (off)
+  CheckBox     | Chord-Aware             | 0 or 1         | 1 (on)
+  CheckBox     | Ungroup Generated       | 0 or 1         | 1 (on)
+  CheckBox     | Remove Duplicates       | 0 or 1         | 1 (on)
+
+  PRESERVE RHYTHM:
+  - Only affects Retrograde mode
+  - When ON: reverses the PITCH sequence but keeps original timing
+    (notes stay at their time positions, but pitches are reassigned
+    in reverse order)
+  - When OFF: full time-mirror (notes move to reversed time positions)
+
+  CHORD-AWARE:
+  - Affects Retrograde (with Preserve Rhythm) and Rotation
+  - When ON: groups simultaneous notes as "chord events" and reverses/
+    rotates at the event level. Chords stay intact as units.
+  - When OFF: treats every note individually. Can scramble chord tones.
+
+  UNGROUP GENERATED:
+  - When ON: sets group=0 on generated notes (palindrome copies,
+    contrary motion countervoice) so they're independent
+  - When OFF: generated notes inherit the source note's group
+
+  REMOVE DUPLICATES:
+  - When ON: removes exact duplicate notes (same time, pitch, length,
+    color, group) that can result from palindrome or contrary motion
+  - Prevents voice stealing and CPU spikes from stacked identical notes
+
+===========================================================================
+  STEP 3: CONTROL NAMING — CRITICAL
+===========================================================================
+
+  Control names MUST match EXACTLY (case-sensitive, including spaces):
+
+    "Transform"
+    "Pitch Axis"
+    "Custom Axis Note"
+    "Time Window"
+    "Append Gap (ticks)"
+    "Rotation Steps"
+    "Preserve Rhythm"
+    "Chord-Aware"
+    "Ungroup Generated"
+    "Remove Duplicates"
+
+===========================================================================
+  STEP 4: VISUAL DESIGN SUGGESTIONS
+===========================================================================
+
+  BACKGROUND:  Dark gray or black (#1a1a1a)
+  LABELS:       "TRANSFORM"    "WINDOW"    "OPTIONS"
+  TOTAL SIZE:   ~550 x 300 pixels
+
+  COLOR CODING (optional):
+  - Transform controls:  Purple/violet accent (composition theme)
+  - Window/Timing:       Blue accent
+  - Options/toggles:     Green accent
+
+===========================================================================
+  STEP 5: UNDERSTANDING THE TRANSFORMS
+===========================================================================
+
+  RETROGRADE:
+  - Full: mirrors note positions in time within the window [W0, W1]
+    Formula: new_time = W0 + W1 - (note.time + note.length)
+  - With Preserve Rhythm: reverses pitch order while keeping all
+    note positions and lengths exactly as they are
+
+  INVERSION (CHROMATIC):
+  - Reflects each pitch around the axis: new = 2*axis - old
+  - Pure interval math — doesn't consider key signature
+
+  DIATONIC INVERSION:
+  - Same chromatic reflection, then snaps result to the active scale
+  - Requires scale highlighting set in piano roll (Helpers > Scale)
+  - Falls back to chromatic if no scale is set
+  - Much more useful for songwriting than raw chromatic inversion
+
+  TIME PALINDROME:
+  - Keeps original notes, then appends a time-reversed copy
+  - Uses correct math that works even when notes start after tick 0
+  - Append Gap controls spacing between original and reversed copy
+
+  PITCH PALINDROME:
+  - Keeps original notes, then appends a pitch-inverted copy
+  - The copy is shifted to start after the original ends
+  - Useful for creating melodic arcs (up then down, or vice versa)
+
+  ROTATION:
+  - Shifts which pitches land on which time positions
+  - Chord-Aware: rotates chord events as units
+  - Note-level: rotates individual pitch assignments
+  - Steps = how many positions to shift
+
+  CONTRARY MOTION:
+  - Keeps all original notes AND adds an inverted countervoice
+  - Two voices moving in opposite directions (true contrary motion)
+  - Doubles the note count (original + inverted copy)
+
+===========================================================================
+  STEP 6: TESTING
+===========================================================================
+
+  PREVIEW IDEMPOTENCE TEST:
+  - Open the script dialog
+  - Set Transform to Retrograde, change axis, change back
+  - Notes should NOT drift or compound — each preview renders from
+    the original snapshot captured when the dialog opened
+
+  PALINDROME MATH TEST:
+  - Select notes starting at tick 960 (not tick 0)
+  - Run Time Palindrome
+  - Appended copy should start immediately after the original ends
+  - Notes should NOT collapse onto the same time position
+
+  DIATONIC INVERSION TEST:
+  - Set scale to C Natural Minor in Helpers > Scale highlighting
+  - Draw a D note, run Diatonic Inversion with Auto axis
+  - Result should land on an in-scale note, not a chromatic pitch
+
+  PROPERTY PRESERVATION TEST:
+  - Create a slide note (common in trap 808 basslines)
+  - Run Retrograde
+  - The slide flag must survive the transformation
+
+  CONTRARY MOTION TEST:
+  - Draw a 4-note ascending melody (C D E F)
+  - Run Contrary Motion
+  - Should see 8 notes: original ascending + inverted descending
+
+  CHORD-AWARE ROTATION TEST:
+  - Draw 4 triads (C, Dm, Em, F) at consecutive beats
+  - Set Rotation Steps = 1, Chord-Aware ON
+  - Chord at beat 1 should get beat 2's pitches, etc.
+  - Each triad should remain intact (not scrambled)
+
+===========================================================================
+  TROUBLESHOOTING
+===========================================================================
+
+  "Notes keep compounding / drifting when I tweak controls"
+  - This should NOT happen in version 2.0
+  - The script snapshots original notes in createDialog()
+  - Each apply() works from that snapshot, not the current state
+
+  "Diatonic inversion sounds chromatic"
+  - Make sure scale highlighting is set in the piano roll
+  - The script reads snap_scale_helper — if no scale is set,
+    it falls back to pure chromatic inversion
+
+  "Contrary motion only shows inverted notes, not both"
+  - Version 2.0 keeps BOTH original AND inverted countervoice
+  - If you only see one set, check Remove Duplicates — if original
+    and inverted happen to land on same pitches, they may be deduped
+
+  "Rotation doesn't seem to do anything"
+  - Rotation Steps might equal the number of events (full rotation
+    = back to original). Try different step values.
+  - With Chord-Aware ON, steps rotate event groups, not individual notes
+
+===========================================================================

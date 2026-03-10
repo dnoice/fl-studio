@@ -35,7 +35,7 @@
 
 ## 1. Executive Summary
 
-The fl-studio-toolkit is a well-structured, ambitious project spanning 6 Python modules (~10,400 lines), a C++ DSP module, and 10 FL Studio integration scripts. The codebase demonstrates strong fundamentals: consistent naming conventions, good module separation, ~95% type hint coverage, and 277+ tests across 6 test files.
+The fl-studio-toolkit is a well-structured, ambitious project spanning 6 Python modules (~10,400 lines), a C++ DSP module, and 19 FL Studio integration scripts (13 piano roll + 6 Edison). The codebase demonstrates strong fundamentals: consistent naming conventions, good module separation, ~95% type hint coverage, and 277+ tests across 6 test files.
 
 **Key Strengths:**
 
@@ -111,7 +111,7 @@ fl-studio/
 │   ├── bindings/pybind_dsp.cpp
 │   ├── include/ (dsp_core.h, effects.h, filters.h)
 │   └── src/ (dsp_core.cpp, effects.cpp, filters.cpp)
-├── fl_scripts/           # FL Studio integration (6 piano roll + 4 Edison scripts)
+├── fl_scripts/           # FL Studio integration (13 piano roll + 6 Edison scripts)
 ├── assets/audio/         # 5 MP3 test assets
 ├── tests/                # 6 test modules, 277+ tests
 ├── install_scripts.py    # FL Studio script installer
@@ -128,7 +128,7 @@ fl-studio/
 ### 3.1 Bugs & Logic Errors
 
 | ID | File | Line | Severity | Description |
-|----|------|------|----------|-------------|
+| ---- | ------ | ------ | ---------- | ------------- |
 | BUG-001 | `audio_tools/sample_slicer.py` | 157 | **CRITICAL** | No-op assignment `filtered[-1] = filtered[-1]` in slice merging. Short slices below `min_duration_ms` are silently ignored instead of being merged with the previous slice. The intended logic should merge by extending the previous boundary: `filtered[-1] = pos` or simply `pass`. |
 | BUG-002 | `midi_tools/midi_analyzer.py` | 154 | **HIGH** | `octave_counts[note.pitch // 12 - 1]` produces negative index for pitches 0-11 (octave -1). No validation on pitch range. |
 | BUG-003 | `midi_tools/arpeggiator.py` | 114 | **MEDIUM** | `expanded_up + expanded_down[1:-1]` returns empty list when `expanded_down` has fewer than 3 elements, causing silent data loss in UP_DOWN mode with 1-2 notes. |
@@ -138,7 +138,7 @@ fl-studio/
 ### 3.2 Input Validation Gaps
 
 | ID | File | Line | Severity | Description |
-|----|------|------|----------|-------------|
+| ---- | ------ | ------ | ---------- | ------------- |
 | VAL-001 | `mixing/_biquad.py` | 16 | **HIGH** | No check for `sr > 0` before `2 * pi * freq / sr`. Division by zero if sample rate is 0. |
 | VAL-002 | `mixing/_biquad.py` | 16 | **HIGH** | No check for `freq < sr/2` (Nyquist). Frequencies above Nyquist produce unstable biquad filters. |
 | VAL-003 | `mixing/effects_chain.py` | 62 | **MEDIUM** | Filter frequency parameter has no bounds checking. |
@@ -149,7 +149,7 @@ fl-studio/
 ### 3.3 Error Handling Deficiencies
 
 | ID | File | Severity | Description |
-|----|------|----------|-------------|
+| ---- | ------ | ---------- | ------------- |
 | ERR-001 | `audio_tools/spectrum_analyzer.py:96` | **HIGH** | `sf.read()` call has no try/except. Corrupted audio files will crash with opaque libsndfile errors. |
 | ERR-002 | `workflow/flp_parser.py` | **HIGH** | Binary FLP parsing has no exception handling for malformed/truncated files. |
 | ERR-003 | `midi_tools/midi_file_utils.py:59-87` | **HIGH** | `extract_notes()` assumes valid MIDI format. No validation of message types or timing values. |
@@ -160,7 +160,7 @@ fl-studio/
 ### 3.4 Code Duplication
 
 | ID | Location | Description | Recommendation |
-|----|----------|-------------|----------------|
+| ---- | ---------- | ------------- | ---------------- |
 | DUP-001 | `batch_processor.py:262-281`, `format_converter.py:182-197` | Identical linear interpolation resampling logic | Extract to `audio_tools/_resample.py` |
 | DUP-002 | `bpm_detector.py:74`, `spectrum_analyzer.py:110`, `sample_slicer.py:73` | Hanning window creation repeated | Centralize in `audio_tools/_dsp_utils.py` |
 | DUP-003 | Multiple midi_tools files | MIDI note range validation `0 <= n <= 127` repeated | Create `midi_tools/_validation.py` with `validate_pitch()`, `validate_velocity()` |
@@ -169,7 +169,7 @@ fl-studio/
 ### 3.5 Security Concerns
 
 | ID | File | Severity | Description |
-|----|------|----------|-------------|
+| ---- | ------ | ---------- | ------------- |
 | SEC-001 | `workflow/preset_manager.py:78-88` | **MEDIUM** | `rglob('*')` follows symlinks by default. A malicious preset directory with symlinks could expose files outside the intended tree. |
 | SEC-002 | `install_scripts.py:108` | **MEDIUM** | User-supplied `--fl-path` argument not validated. Path traversal via `..` segments possible. Should use `Path().resolve()` and validate. |
 | SEC-003 | `release/metadata.py` | **LOW** | ISRC/UPC fields accept arbitrary strings without control character filtering. |
@@ -179,7 +179,7 @@ fl-studio/
 **Overall type hint coverage: ~95%** (excellent)
 
 | ID | File | Description |
-|----|------|-------------|
+| ---- | ------ | ------------- |
 | TYPE-001 | `audio_tools/batch_processor.py:189` | `_apply_operation()` missing return type annotation. Should be `tuple[np.ndarray, int]`. |
 | TYPE-002 | `midi_tools/midi_analyzer.py:264` | Return type `dict` should be `dict[str, Any]` or a TypedDict. |
 | TYPE-003 | `release/export_pipeline.py` | Uses plain dicts where TypedDict would provide better type checking. |
@@ -188,7 +188,7 @@ fl-studio/
 ### 3.7 API Consistency
 
 | ID | Description | Recommendation |
-|----|-------------|----------------|
+| ---- | ------------- | ---------------- |
 | API-001 | Mixed return types: some functions return `(audio, sr)` tuples, others return just arrays, others return dataclass objects | Standardize: dataclass objects for analysis results, `(audio, sr)` tuples for audio processing |
 | API-002 | Error signaling inconsistent: ProcessingResult.success=False vs raising exceptions | Convention: raise on programmer errors (bad args), return result objects for runtime failures (bad files) |
 | API-003 | Some functions forward `**kwargs` without documenting valid keys | Make keyword arguments explicit in signatures |
@@ -198,7 +198,7 @@ fl-studio/
 **373+ tests | 7 test files | 50+ test classes | ~88% estimated line coverage**
 
 | Metric | Rating | Notes |
-|--------|--------|-------|
+| -------- | -------- | ------- |
 | Module coverage | Good | mixing 98%, release 97%, audio_tools 95%, midi_tools 85%, workflow 70%, dsp 0% |
 | Edge case coverage | Good (80%) | Boundary values, silent/short audio, MIDI extremes covered in test_hardened.py |
 | Negative tests | Good | 20+ `pytest.raises()` tests across biquad, MIDI, FLP parser, audio modules |
@@ -217,7 +217,7 @@ fl-studio/
 ### 3.9 Project Infrastructure Gaps
 
 | Item | Status | Impact |
-|------|--------|--------|
+| ------ | -------- | -------- |
 | README.md | **FIXED** | Created with overview, install, quick start, module docs |
 | .gitignore | **FIXED** | Created covering Python, venv, build, IDE, OS, C++ artifacts |
 | CI/CD | **Missing** | No automated testing, linting, or release pipeline |
@@ -410,6 +410,28 @@ fl-studio/
 - [ ] **Tag release** and create GitHub release notes (awaiting user push)
 - [ ] **Consider PyPI publication** if project is ready for public distribution
 
+### Phase 8: FL Scripts Enhancement (Audit-Driven Rewrites) -- COMPLETED
+
+> Systematic audit and rewrite of all piano roll scripts based on individual PDF audits.
+
+Each script received a dedicated audit PDF identifying algorithm correctness issues, API misuse,
+missing features, and FL Studio-specific bugs. Scripts were rewritten in priority order.
+
+- [x] **Bass Humanizer** — 9 enhancements (timing/velocity humanization, ghost notes, scale snapping)
+- [x] **Bass Line Generator** — 13 enhancements (pattern generation, scale awareness, rhythm variety)
+- [x] **Chord Stamper** — Major rewrite (voicing, inversions, spread, strum)
+- [x] **Bass Octave Doubler** — Additive mode, collision detection, acoustic profiling, scale snapping
+- [x] **Chord Voicer** — 11 fixes (drop voicings, pitch-class spread, quartal, voice leading, 0-131 range)
+- [x] **Ghost Note Generator** — 11 fixes (collision detection, Bjorklund rhythm, Gaussian jitter, ghost color routing)
+- [x] **Melodic Mirror** — 12 fixes (snapshot idempotence, safe commit, diatonic inversion, contrary motion, timeline selection)
+- [x] **Note Spreader** — 6 fixes (deterministic seeded random, explicit ordering, min/max range, ignore muted)
+- [x] **Note Length Shaper** — 7 fixes (in-place mutation, O(n log n) legato, polyphonic isolation, Gaussian humanization)
+- [x] **Rhythm Generator** — 10 fixes (Bjorklund Euclidean, true polyrhythm N:M, LHL syncopation, timeline selection)
+- [x] **Strum Generator** — 7 fixes (Fan Out/In even-count bug, deterministic RNG, sliding-window grouping, tension curves)
+- [x] **Velocity Curves** — 8 fixes (FL Studio native tension, S-Curve, cubic Bézier, Euclidean accent, Gaussian humanize)
+- [x] **Control Surface Guides** — 12 `.txt` build guides for custom GUI panels (all scripts except Scale Quantizer)
+- [x] **Edison scripts** — 6 new Edison scripts (Auto Chop, Bit Crusher, Fade Designer, Spectral Gate, Stutter Edit, Transient Shaper)
+
 ---
 
 ## 5. Module-by-Module Issue Tracker
@@ -417,7 +439,7 @@ fl-studio/
 ### audio_tools/
 
 | File | Issues | Priority |
-|------|--------|----------|
+| ------ | -------- | ---------- |
 | `sample_slicer.py:157` | BUG-001: No-op assignment in slice merging | P0 |
 | `spectrum_analyzer.py:96` | ERR-001: No error handling on sf.read() | P1 |
 | `batch_processor.py:262` | DUP-001: Duplicated resampling logic | P2 |
@@ -428,7 +450,7 @@ fl-studio/
 ### midi_tools/
 
 | File | Issues | Priority |
-|------|--------|----------|
+| ------ | -------- | ---------- |
 | `midi_analyzer.py:154` | BUG-002: Negative octave indexing | P0 |
 | `midi_analyzer.py:229` | BUG-005: Empty list min() crash | P0 |
 | `arpeggiator.py:114` | BUG-003: Empty slice in UP_DOWN | P1 |
@@ -440,7 +462,7 @@ fl-studio/
 ### mixing/
 
 | File | Issues | Priority |
-|------|--------|----------|
+| ------ | -------- | ---------- |
 | `_biquad.py:16` | VAL-001: Division by zero if sr=0 | P0 |
 | `_biquad.py:16` | VAL-002: No Nyquist frequency check | P0 |
 | `gain_staging.py:73` | BUG-004: Hardcoded stereo assumption | P1 |
@@ -450,7 +472,7 @@ fl-studio/
 ### workflow/
 
 | File | Issues | Priority |
-|------|--------|----------|
+| ------ | -------- | ---------- |
 | `flp_parser.py` | ERR-002: No binary parsing error handling | P1 |
 | `preset_manager.py:78` | SEC-001: Symlink traversal risk | P1 |
 | All files | Low test coverage (~70%) | P2 |
@@ -458,7 +480,7 @@ fl-studio/
 ### release/
 
 | File | Issues | Priority |
-|------|--------|----------|
+| ------ | -------- | ---------- |
 | `metadata.py` | ERR-004: No file I/O error handling | P2 |
 | `metadata.py:122` | SEC-003: No ISRC control char filtering | P3 |
 | `export_pipeline.py` | TYPE-003: Plain dicts vs TypedDict | P3 |
@@ -466,7 +488,7 @@ fl-studio/
 ### dsp/ (C++)
 
 | Item | Issues | Priority |
-|------|--------|----------|
+| ------ | -------- | ---------- |
 | Entire module | No Python test coverage (0%) | P2 |
 | Build system | Untested on current platform | P2 |
 | Integration | No fallback pattern if build fails | P2 |
@@ -474,7 +496,7 @@ fl-studio/
 ### Project Infrastructure
 
 | Item | Issues | Priority |
-|------|--------|----------|
+| ------ | -------- | ---------- |
 | .gitignore | Missing entirely | P0 |
 | tests/conftest.py | Missing - fixtures duplicated | P1 |
 | README.md | Missing entirely | P1 |
@@ -499,7 +521,7 @@ fl-studio/
 ## Estimated Effort Summary
 
 | Phase | Items | Effort |
-|-------|-------|--------|
+| ------- | ------- | -------- |
 | Phase 1: Critical Fixes | 5 bugs | Small |
 | Phase 2: Stability & Validation | 10 items | Medium |
 | Phase 3: Test Hardening | 8 items | Medium-Large |

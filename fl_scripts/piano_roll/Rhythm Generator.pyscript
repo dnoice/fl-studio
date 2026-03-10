@@ -1,43 +1,157 @@
-"""Rhythm Generator - Generate rhythmic patterns using Euclidean and polyrhythmic algorithms.
+"""Rhythm Generator Pro - Generate rhythmic patterns using advanced algorithms.
 
-Creates rhythmic note patterns from mathematical distributions,
-with support for Euclidean rhythms, polyrhythms, and density-based generation.
+Creates rhythmic note patterns from Bjorklund Euclidean distributions,
+true polyrhythms (N:M with PPQ-based step calculation), polymeters,
+LHL metrical syncopation, density gradients, and dotted patterns.
+Features timeline selection awareness, velocity accents with Gaussian
+humanization, MIDI channel routing, and deterministic seeded randomness.
+
+Enhanced from audit recommendations for musically correct rhythm generation.
 """
 
 import flpianoroll as flp
 import math
 
 
+# ---------------------------------------------------------------------------
+# Mode and option definitions
+# ---------------------------------------------------------------------------
 RHYTHM_MODES = [
-    'Euclidean',
-    'Polyrhythm (2 layers)',
+    'Euclidean (Bjorklund)',
+    'Polyrhythm (true N:M)',
+    'Polymeter (2 layers)',
+    'Syncopated (LHL metrical)',
     'Density Gradient',
-    'Syncopated',
     'Dotted',
 ]
 
-NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+DENSITY_CURVES = [
+    'Sine',
+    'Linear Rise',
+    'Linear Fall',
+    'Gaussian',
+    'Uniform',
+]
 
 
-def euclidean_rhythm(onsets, pulses):
-    """Bresenham-based Euclidean rhythm generator."""
-    if pulses <= 0:
+# ---------------------------------------------------------------------------
+# Deterministic seeded RNG (preview/accept stable)
+# ---------------------------------------------------------------------------
+_rng_state = 7919
+
+
+def _seed(val):
+    global _rng_state
+    _rng_state = max(1, val & 0x7FFFFFFF)
+
+
+def _rand():
+    """LCG step returning float in [0, 1]."""
+    global _rng_state
+    _rng_state = (_rng_state * 1103515245 + 12345) & 0x7FFFFFFF
+    return _rng_state / 0x7FFFFFFF
+
+
+def _xorshift32(x):
+    """XorShift32 PRNG step."""
+    x &= 0xFFFFFFFF
+    x ^= (x << 13) & 0xFFFFFFFF
+    x ^= (x >> 17) & 0xFFFFFFFF
+    x ^= (x << 5) & 0xFFFFFFFF
+    return x & 0xFFFFFFFF
+
+
+def _rand01(seed, step, layer):
+    """Deterministic pseudo-random float in [0, 1] from step identity."""
+    x = seed & 0xFFFFFFFF
+    x ^= (step * 0x9E3779B1) & 0xFFFFFFFF
+    x ^= ((layer + 1) * 0x85EBCA6B) & 0xFFFFFFFF
+    x = _xorshift32(x)
+    return x / 0xFFFFFFFF
+
+
+# ---------------------------------------------------------------------------
+# Gaussian random via Box-Muller transform
+# ---------------------------------------------------------------------------
+def _gauss():
+    """Standard normal random (mean=0, sigma=1) via Box-Muller."""
+    u1 = max(1e-10, _rand())
+    u2 = _rand()
+    return math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+
+
+# ---------------------------------------------------------------------------
+# Math helpers
+# ---------------------------------------------------------------------------
+def _clamp(x, lo, hi):
+    if x < lo:
+        return lo
+    if x > hi:
+        return hi
+    return x
+
+
+# ---------------------------------------------------------------------------
+# Bjorklund's Euclidean rhythm algorithm
+# ---------------------------------------------------------------------------
+def _bjorklund(onsets, pulses):
+    """Generate a Euclidean rhythm pattern E(onsets, pulses).
+
+    Returns a list of booleans of length 'pulses' where True = onset.
+    Uses Bjorklund's algorithm (recursive list-pairing), producing
+    culturally correct phase alignment for traditional timelines
+    (e.g., E(5,8) = Cinquillo, E(3,8) = Tresillo).
+    """
+    if onsets <= 0 or pulses <= 0:
         return []
     if onsets >= pulses:
         return [True] * pulses
-    if onsets <= 0:
-        return [False] * pulses
-    slope = onsets / pulses
-    previous = -1
-    result = []
-    for i in range(pulses):
-        current = int(i * slope)
-        result.append(current != previous)
-        previous = current
-    return result
+
+    pattern = []
+    counts = []
+    remainders = []
+
+    divisor = pulses - onsets
+    remainders.append(onsets)
+    level = 0
+
+    while True:
+        counts.append(divisor // remainders[level])
+        new_remainder = divisor % remainders[level]
+        remainders.append(new_remainder)
+        divisor = remainders[level]
+        level += 1
+        if remainders[level] <= 1:
+            break
+
+    counts.append(divisor)
+
+    def _build(lvl):
+        if lvl == -1:
+            pattern.append(False)
+            return
+        if lvl == -2:
+            pattern.append(True)
+            return
+        for _ in range(counts[lvl]):
+            _build(lvl - 1)
+        if remainders[lvl] != 0:
+            _build(lvl - 2)
+
+    _build(level)
+
+    # Rotate so first element is True (onset on downbeat)
+    if pattern and not pattern[0]:
+        try:
+            first_true = pattern.index(True)
+            pattern = pattern[first_true:] + pattern[:first_true]
+        except ValueError:
+            pass
+
+    return pattern
 
 
-def rotate_list(lst, shift):
+def _rotate_list(lst, shift):
     """Rotate a list by shift positions."""
     if not lst:
         return lst
@@ -45,92 +159,439 @@ def rotate_list(lst, shift):
     return lst[shift:] + lst[:shift]
 
 
-def createDialog():
+# ---------------------------------------------------------------------------
+# Longuet-Higgins & Lee metrical weight hierarchy
+# ---------------------------------------------------------------------------
+def _lhl_weights(pulses, tsnum, tsden):
+    """Build LHL metrical weight array for the given time signature.
+
+    Returns a list of weights where higher values = stronger metrical
+    positions. Weight 0 = downbeat (strongest), decreasing for subdivisions.
+
+    Handles 4/4, 3/4, 6/8, and other time signatures by recursively
+    subdividing the measure into hierarchical levels.
+    """
+    weights = [-99] * pulses
+
+    # Determine beats per measure and subdivision
+    if tsden == 8 and tsnum % 3 == 0:
+        # Compound meter (6/8, 9/8, 12/8): group in threes
+        beats = tsnum // 3
+    else:
+        beats = tsnum
+
+    # Calculate how many pulses (16th notes) per beat
+    if tsden == 8 and tsnum % 3 == 0:
+        # Compound: each beat = 3 eighth notes = 6 sixteenths
+        pulses_per_beat = 6
+    elif tsden == 4:
+        pulses_per_beat = 4  # 4 sixteenths per quarter
+    elif tsden == 8:
+        pulses_per_beat = 2  # 2 sixteenths per eighth
+    elif tsden == 2:
+        pulses_per_beat = 8  # 8 sixteenths per half
+    else:
+        pulses_per_beat = 4
+
+    # Build hierarchical weights
+    # Level 0: downbeat
+    if pulses > 0:
+        weights[0] = 0
+
+    # Level 1: beat positions
+    for b in range(beats):
+        pos = b * pulses_per_beat
+        if pos < pulses:
+            if weights[pos] < -1:
+                weights[pos] = -1
+
+    # Level 2: half-beat (8th note) positions
+    half = pulses_per_beat // 2
+    if half > 0:
+        for b in range(beats):
+            pos = b * pulses_per_beat + half
+            if pos < pulses:
+                if weights[pos] < -2:
+                    weights[pos] = -2
+
+    # Level 3: quarter-beat (16th note) positions
+    quarter = pulses_per_beat // 4
+    if quarter > 0:
+        for b in range(beats):
+            for sub in range(4):
+                pos = b * pulses_per_beat + sub * quarter
+                if pos < pulses:
+                    if weights[pos] < -3:
+                        weights[pos] = -3
+
+    # Fill remaining with weakest weight
+    for i in range(pulses):
+        if weights[i] <= -99:
+            weights[i] = -4
+
+    return weights
+
+
+# ---------------------------------------------------------------------------
+# Density curve evaluation
+# ---------------------------------------------------------------------------
+def _density_at(t, curve_type, base_density, seed, step):
+    """Evaluate density probability at normalized position t [0, 1].
+
+    Returns probability [0, 1] that a note should be placed at this position.
+    """
+    if curve_type == 0:  # Sine (swell in middle)
+        shape = 0.5 + 0.5 * math.sin(t * math.pi)
+    elif curve_type == 1:  # Linear Rise
+        shape = t
+    elif curve_type == 2:  # Linear Fall
+        shape = 1.0 - t
+    elif curve_type == 3:  # Gaussian (bell curve centered)
+        # Gaussian centered at t=0.5, sigma=0.2
+        shape = math.exp(-((t - 0.5) ** 2) / (2.0 * 0.04))
+    elif curve_type == 4:  # Uniform
+        shape = 1.0
+    else:
+        shape = 1.0
+
+    probability = base_density * shape
+    # Use deterministic random to decide placement
+    r = _rand01(seed, step, 99)
+    return r < probability
+
+
+# ---------------------------------------------------------------------------
+# Note creation helper
+# ---------------------------------------------------------------------------
+def _make_note(pitch, time, length, velocity, color):
+    """Create a new Note with safe property initialization."""
+    n = flp.Note()
+    n.number = _clamp(pitch, 0, 131)
+    n.time = max(0, int(time))
+    n.length = max(1, int(length))
+    n.velocity = _clamp(velocity, 0.0, 1.0)
+    n.color = _clamp(color, 0, 15)
+    n.pan = 0.5
+    n.fcut = 0.5
+    n.fres = 0.5
+    n.group = 0
+    # Prevent unintended slide/portamento on generated percussion
+    try:
+        n.slide = False
+    except Exception:
+        pass
+    try:
+        n.porta = False
+    except Exception:
+        pass
+    try:
+        n.pitchofs = 0
+    except Exception:
+        pass
+    return n
+
+
+# ---------------------------------------------------------------------------
+# Control Surface .fst support
+# ---------------------------------------------------------------------------
+_FST_FILE = 'Rhythm Generator.fst'
+
+
+def _try_load_surface():
+    """Attempt to load the Control Surface .fst GUI."""
+    try:
+        form = flp.LoadSurface(_FST_FILE)
+        if form is not None:
+            return form
+    except Exception:
+        pass
+    return None
+
+
+def _build_standard_dialog():
+    """Build the standard ScriptDialog fallback UI."""
     form = flp.ScriptDialog(
-        'Rhythm Generator',
-        'Generates rhythmic patterns using mathematical algorithms.\r\n'
-        'Euclidean: distributes N onsets evenly across M pulses.\r\n'
-        'Polyrhythm: overlays two Euclidean layers.\r\n'
-        'Pattern Length is in 16th notes.'
+        'Rhythm Generator Pro',
+        'Generates rhythmic patterns using advanced algorithms.\r\n\r\n'
+        'Euclidean: Bjorklund algorithm for culturally accurate rhythms.\r\n'
+        'Polyrhythm: true N:M with independent step sizes per layer.\r\n'
+        'Polymeter: two Euclidean patterns merged on the same grid.\r\n'
+        'Syncopated: LHL metrical model displaces strong-beat notes\r\n'
+        'to adjacent weak beats for intelligent groove.\r\n'
+        'Density: probability-based generation with curve shaping.\r\n'
+        'Dotted: notes spaced at dotted intervals (3 sixteenths).\r\n\r\n'
+        'Use Timeline Selection bounds generation to the highlighted region.\r\n'
+        'Layer colors route Polyrhythm/Polymeter layers to MIDI channels.'
     )
+    # --- Mode ---
     form.AddInputCombo('Mode', RHYTHM_MODES, 0)
     form.AddInputKnobInt('Pattern Length', 16, 2, 64)
     form.AddInputKnobInt('Onsets', 5, 1, 32)
     form.AddInputKnobInt('Rotation', 0, 0, 32)
-    form.AddInputKnobInt('Layer 2 Onsets', 3, 1, 16)
-    form.AddInputKnobInt('Note Number', 60, 0, 127)
+    # --- Layers ---
+    form.AddInputKnobInt('Layer 2 Beats', 3, 1, 16)
+    form.AddInputKnobInt('Layer 1 Color', 0, 0, 15)
+    form.AddInputKnobInt('Layer 2 Color', 1, 0, 15)
+    # --- Note ---
+    form.AddInputKnobInt('Note Number', 60, 0, 131)
     form.AddInputKnob('Velocity', 0.8, 0.1, 1.0)
     form.AddInputKnob('Note Length', 1.0, 0.1, 4.0)
+    # --- Dynamics ---
+    form.AddInputKnob('Accent Strength', 0.3, 0.0, 1.0)
+    form.AddInputKnob('Humanize', 0.10, 0.00, 1.00)
+    # --- Syncopation ---
+    form.AddInputKnob('Syncopation Intensity', 0.5, 0.0, 1.0)
+    # --- Density ---
+    form.AddInputCombo('Density Curve', DENSITY_CURVES, 0)
+    form.AddInputKnob('Density', 0.6, 0.0, 1.0)
+    # --- Structure ---
     form.AddInputKnobInt('Repeats', 1, 1, 8)
+    form.AddInputKnobInt('Seed', 0, 0, 9999)
+    form.AddInputCheckbox('Use Timeline Selection', True)
     return form
 
 
+def createDialog():
+    """Try Control Surface first, fall back to ScriptDialog."""
+    form = _try_load_surface()
+    if form is not None:
+        return form
+    return _build_standard_dialog()
+
+
+# ---------------------------------------------------------------------------
+# Apply — Bjorklund, polyrhythm, LHL syncopation, density, accents
+# ---------------------------------------------------------------------------
 def apply(form):
     mode = int(form.GetInputValue('Mode'))
     pulses = int(form.GetInputValue('Pattern Length'))
     onsets = int(form.GetInputValue('Onsets'))
     rotation = int(form.GetInputValue('Rotation'))
-    layer2_onsets = int(form.GetInputValue('Layer 2 Onsets'))
-    note_num = int(form.GetInputValue('Note Number'))
-    velocity = form.GetInputValue('Velocity')
-    note_len_mult = form.GetInputValue('Note Length')
-    repeats = int(form.GetInputValue('Repeats'))
+    layer2_beats = int(form.GetInputValue('Layer 2 Beats'))
+    color1 = int(_clamp(int(form.GetInputValue('Layer 1 Color')), 0, 15))
+    color2 = int(_clamp(int(form.GetInputValue('Layer 2 Color')), 0, 15))
+    note_num = int(_clamp(int(form.GetInputValue('Note Number')), 0, 131))
+    velocity = _clamp(form.GetInputValue('Velocity'), 0.1, 1.0)
+    note_len_mult = _clamp(form.GetInputValue('Note Length'), 0.1, 4.0)
+    accent_strength = _clamp(form.GetInputValue('Accent Strength'), 0.0, 1.0)
+    humanize_amt = _clamp(form.GetInputValue('Humanize'), 0.0, 1.0)
+    sync_intensity = _clamp(form.GetInputValue('Syncopation Intensity'), 0.0, 1.0)
+    density_curve = int(form.GetInputValue('Density Curve'))
+    density = _clamp(form.GetInputValue('Density'), 0.0, 1.0)
+    repeats = int(_clamp(int(form.GetInputValue('Repeats')), 1, 8))
+    seed = int(form.GetInputValue('Seed'))
+    use_timeline = bool(form.GetInputValue('Use Timeline Selection'))
 
-    step_ticks = flp.score.PPQ // 4  # 16th note
-    note_length = int(step_ticks * note_len_mult)
+    ppq = flp.score.PPQ
+    step_ticks = ppq // 4  # 16th note
 
-    # Generate rhythm pattern
-    if mode == 0:  # Euclidean
-        pattern = euclidean_rhythm(onsets, pulses)
-        pattern = rotate_list(pattern, rotation)
+    # Seed RNG deterministically
+    _seed(max(1, seed * 31337 + pulses * 7 + onsets * 13))
 
-    elif mode == 1:  # Polyrhythm
-        layer1 = euclidean_rhythm(onsets, pulses)
-        layer2 = euclidean_rhythm(layer2_onsets, pulses)
-        layer1 = rotate_list(layer1, rotation)
-        # Combine layers
-        pattern = [a or b for a, b in zip(layer1, layer2)]
+    # Time signature for LHL weights
+    try:
+        tsnum = flp.score.tsnum
+        tsden = flp.score.tsden
+    except Exception:
+        tsnum = 4
+        tsden = 4
 
-    elif mode == 2:  # Density Gradient
-        pattern = []
-        for i in range(pulses):
-            t = i / pulses
-            threshold = 0.3 + 0.5 * math.sin(t * math.pi)
-            density = onsets / pulses
-            pattern.append(density > (1 - threshold))
+    # Timeline selection bounding
+    gen_start = 0
+    if use_timeline:
+        try:
+            sel = flp.score.getTimelineSelection()
+            if sel[1] > sel[0] and sel[0] >= 0:
+                gen_start = sel[0]
+        except Exception:
+            pass
 
-    elif mode == 3:  # Syncopated
-        base = euclidean_rhythm(onsets, pulses)
-        base = rotate_list(base, rotation)
-        # Shift some hits to off-beats
-        pattern = [False] * pulses
-        for i, hit in enumerate(base):
-            if hit:
-                # Shift odd-indexed hits by one step
-                new_pos = (i + 1) % pulses if i % 2 == 1 else i
-                pattern[new_pos] = True
+    note_length = max(1, int(step_ticks * note_len_mult))
 
-    elif mode == 4:  # Dotted
-        pattern = [False] * pulses
-        pos = 0
-        count = 0
-        while pos < pulses and count < onsets:
-            pattern[pos] = True
-            pos += 3  # Dotted = 3 sixteenth notes
-            count += 1
+    # Build LHL metrical weights for accent and syncopation
+    weights = _lhl_weights(pulses, tsnum, tsden)
 
-    else:
-        pattern = euclidean_rhythm(onsets, pulses)
+    # Compute max weight for normalization
+    max_weight = max(weights) if weights else 0
+    min_weight = min(weights) if weights else -4
 
-    # Write notes
-    for rep in range(repeats):
-        time_offset = rep * pulses * step_ticks
-        for step, is_onset in enumerate(pattern):
-            if is_onset:
-                note = flp.Note()
-                note.number = note_num
-                note.time = step * step_ticks + time_offset
-                note.length = note_length
-                note.velocity = velocity
-                note.color = 0
-                flp.score.addNote(note)
+    # ===================================================================
+    # Mode implementations
+    # ===================================================================
+
+    if mode == 0:  # Euclidean (Bjorklund)
+        pattern = _bjorklund(onsets, pulses)
+        pattern = _rotate_list(pattern, rotation)
+
+        for rep in range(repeats):
+            time_base = gen_start + rep * pulses * step_ticks
+            for step, is_onset in enumerate(pattern):
+                if is_onset:
+                    vel = _accent_velocity(velocity, weights, step,
+                                           accent_strength, humanize_amt,
+                                           seed, step + rep * pulses,
+                                           max_weight, min_weight)
+                    n = _make_note(note_num, time_base + step * step_ticks,
+                                   note_length, vel, color1)
+                    flp.score.addNote(n)
+
+    elif mode == 1:  # Polyrhythm (true N:M)
+        # Layer 1: 'onsets' evenly spaced beats across measure
+        # Layer 2: 'layer2_beats' evenly spaced beats across same measure
+        measure_ticks = pulses * step_ticks
+
+        for rep in range(repeats):
+            time_base = gen_start + rep * measure_ticks
+
+            # Layer 1: onsets beats, evenly spaced
+            if onsets > 0:
+                l1_step = measure_ticks / float(onsets)
+                for i in range(onsets):
+                    t = time_base + int(round(i * l1_step))
+                    vel = _accent_velocity(velocity, weights,
+                                           int(round(i * l1_step / step_ticks)) % pulses,
+                                           accent_strength, humanize_amt,
+                                           seed, i + rep * onsets,
+                                           max_weight, min_weight)
+                    n = _make_note(note_num, t, note_length, vel, color1)
+                    flp.score.addNote(n)
+
+            # Layer 2: layer2_beats beats, evenly spaced (different step)
+            if layer2_beats > 0:
+                l2_step = measure_ticks / float(layer2_beats)
+                for i in range(layer2_beats):
+                    t = time_base + int(round(i * l2_step))
+                    vel = _accent_velocity(velocity, weights,
+                                           int(round(i * l2_step / step_ticks)) % pulses,
+                                           accent_strength, humanize_amt,
+                                           seed, i + rep * layer2_beats + 1000,
+                                           max_weight, min_weight)
+                    n = _make_note(note_num, t, note_length, vel, color2)
+                    flp.score.addNote(n)
+
+    elif mode == 2:  # Polymeter (2 layers, same grid)
+        layer1 = _bjorklund(onsets, pulses)
+        layer2 = _bjorklund(layer2_beats, pulses)
+        layer1 = _rotate_list(layer1, rotation)
+
+        for rep in range(repeats):
+            time_base = gen_start + rep * pulses * step_ticks
+            for step in range(pulses):
+                if layer1[step]:
+                    vel = _accent_velocity(velocity, weights, step,
+                                           accent_strength, humanize_amt,
+                                           seed, step + rep * pulses,
+                                           max_weight, min_weight)
+                    n = _make_note(note_num, time_base + step * step_ticks,
+                                   note_length, vel, color1)
+                    flp.score.addNote(n)
+                if layer2[step] and not layer1[step]:
+                    # Only add Layer 2 where Layer 1 doesn't already hit
+                    vel = _accent_velocity(velocity, weights, step,
+                                           accent_strength, humanize_amt,
+                                           seed, step + rep * pulses + 1000,
+                                           max_weight, min_weight)
+                    n = _make_note(note_num, time_base + step * step_ticks,
+                                   note_length, vel, color2)
+                    flp.score.addNote(n)
+
+    elif mode == 3:  # Syncopated (LHL metrical)
+        base = _bjorklund(onsets, pulses)
+        base = _rotate_list(base, rotation)
+
+        # Build syncopated pattern using LHL weights
+        pattern = list(base)  # copy
+
+        if sync_intensity > 0:
+            for i in range(pulses):
+                if not pattern[i]:
+                    continue
+                w = weights[i] if i < len(weights) else -4
+                # Only syncopate notes on strong beats (weight > -3)
+                if w > -3:
+                    # Probability of displacement scales with intensity
+                    # and how strong the beat is (stronger → more likely to shift)
+                    prob = sync_intensity * (1.0 + w) / 2.0
+                    r = _rand01(seed, i, 3)
+                    if r < prob:
+                        # Shift to adjacent weak beat (prefer backward)
+                        target = (i - 1) % pulses
+                        # Only shift if target is empty and weaker
+                        tw = weights[target] if target < len(weights) else -4
+                        if not pattern[target] and tw < w:
+                            pattern[i] = False
+                            pattern[target] = True
+
+        for rep in range(repeats):
+            time_base = gen_start + rep * pulses * step_ticks
+            for step, is_onset in enumerate(pattern):
+                if is_onset:
+                    vel = _accent_velocity(velocity, weights, step,
+                                           accent_strength, humanize_amt,
+                                           seed, step + rep * pulses,
+                                           max_weight, min_weight)
+                    n = _make_note(note_num, time_base + step * step_ticks,
+                                   note_length, vel, color1)
+                    flp.score.addNote(n)
+
+    elif mode == 4:  # Density Gradient
+        for rep in range(repeats):
+            time_base = gen_start + rep * pulses * step_ticks
+            for step in range(pulses):
+                t = step / max(1, pulses) if pulses > 0 else 0.0
+                if _density_at(t, density_curve, density, seed,
+                               step + rep * pulses):
+                    vel = _accent_velocity(velocity, weights, step,
+                                           accent_strength, humanize_amt,
+                                           seed, step + rep * pulses,
+                                           max_weight, min_weight)
+                    n = _make_note(note_num, time_base + step * step_ticks,
+                                   note_length, vel, color1)
+                    flp.score.addNote(n)
+
+    elif mode == 5:  # Dotted
+        for rep in range(repeats):
+            time_base = gen_start + rep * pulses * step_ticks
+            pos = 0
+            count = 0
+            while pos < pulses and count < onsets:
+                vel = _accent_velocity(velocity, weights, pos,
+                                       accent_strength, humanize_amt,
+                                       seed, pos + rep * pulses,
+                                       max_weight, min_weight)
+                n = _make_note(note_num, time_base + pos * step_ticks,
+                               note_length, vel, color1)
+                flp.score.addNote(n)
+                pos += 3  # Dotted = 3 sixteenth notes
+                count += 1
+
+
+# ---------------------------------------------------------------------------
+# Velocity accent + humanization helper
+# ---------------------------------------------------------------------------
+def _accent_velocity(base_vel, weights, step, accent_strength, humanize_amt,
+                     seed, unique_id, max_weight, min_weight):
+    """Apply metrical accent and Gaussian humanization to velocity.
+
+    Stronger metrical positions get higher velocity when accent_strength > 0.
+    Gaussian jitter adds organic micro-variation when humanize_amt > 0.
+    """
+    vel = base_vel
+
+    # Metrical accent
+    if accent_strength > 0 and step < len(weights):
+        w = weights[step]
+        weight_range = max(1, max_weight - min_weight)
+        # Normalize weight to [0, 1] where 1 = strongest beat
+        norm_w = (w - min_weight) / weight_range
+        # Accent adds up to +0.2 on strong beats, -0.1 on weak beats
+        accent = (norm_w - 0.3) * 0.3 * accent_strength
+        vel = vel + accent
+
+    # Gaussian humanization
+    if humanize_amt > 0:
+        z = _gauss()
+        sigma = humanize_amt * 0.08  # Subtle velocity jitter
+        vel = vel + z * sigma
+
+    return _clamp(vel, 0.05, 1.0)

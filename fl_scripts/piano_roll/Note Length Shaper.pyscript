@@ -1,0 +1,444 @@
+"""Note Length Shaper Pro - Batch adjust note lengths with musical precision.
+
+Provides staccato, legato, percentage-based, curve-based, and humanized
+length adjustment. Features polyphonic pitch-isolated legato, O(n log n)
+pitch-mapped lookups, standard easing curves, Gaussian humanization via
+Box-Muller transform, and non-destructive in-place mutation.
+
+Enhanced from audit recommendations for production-grade articulation shaping.
+"""
+
+import flpianoroll as flp
+import math
+
+
+# ---------------------------------------------------------------------------
+# Mode and option definitions
+# ---------------------------------------------------------------------------
+LENGTH_MODES = [
+    'Percentage (scale current length)',
+    'Fixed Length (grid value)',
+    'Staccato (short & punchy)',
+    'Legato (extend to next note)',
+    'Legato with Overlap',
+    'Fill Gap (percentage of gap)',
+    'Curve Over Time',
+    'Humanize Lengths',
+    'Quantize Lengths to Grid',
+]
+
+LEGATO_TARGETS = [
+    'Same Pitch (polyphonic)',
+    'Any Note (monophonic)',
+]
+
+CURVE_TYPES = [
+    'Linear',
+    'Ease In (Quadratic)',
+    'Ease Out (Quadratic)',
+    'Ease In-Out (Sine)',
+    'Exponential In',
+    'Exponential Out',
+    'Triangle',
+    'Random (Seeded)',
+]
+
+GRID_VALUES = [
+    '1 Bar',
+    '1/2 Note',
+    '1/4 Note',
+    '1/8 Note',
+    '1/16 Note',
+    '1/32 Note',
+    '1/4 Triplet',
+    '1/8 Triplet',
+    '1/16 Triplet',
+]
+
+
+# ---------------------------------------------------------------------------
+# Deterministic RNG (preview/accept stable)
+# ---------------------------------------------------------------------------
+_rng_state = 7919
+
+
+def _seed(val):
+    global _rng_state
+    _rng_state = max(1, val & 0x7FFFFFFF)
+
+
+def _rand():
+    """LCG step returning float in [0, 1]."""
+    global _rng_state
+    _rng_state = (_rng_state * 1103515245 + 12345) & 0x7FFFFFFF
+    return _rng_state / 0x7FFFFFFF
+
+
+def _xorshift32(x):
+    """XorShift32 PRNG step."""
+    x &= 0xFFFFFFFF
+    x ^= (x << 13) & 0xFFFFFFFF
+    x ^= (x >> 17) & 0xFFFFFFFF
+    x ^= (x << 5) & 0xFFFFFFFF
+    return x & 0xFFFFFFFF
+
+
+def _rand01(seed, note_time, note_number, idx):
+    """Deterministic pseudo-random float in [0, 1] from note identity.
+
+    Produces the same value for the same note regardless of when apply()
+    is called — critical for preview/accept consistency.
+    """
+    x = seed & 0xFFFFFFFF
+    x ^= (note_time * 0x9E3779B1) & 0xFFFFFFFF
+    x ^= (note_number * 0x85EBCA6B) & 0xFFFFFFFF
+    x ^= ((idx + 1) * 0xC2B2AE35) & 0xFFFFFFFF
+    x = _xorshift32(x)
+    return x / 0xFFFFFFFF
+
+
+# ---------------------------------------------------------------------------
+# Gaussian random via Box-Muller transform
+# ---------------------------------------------------------------------------
+def _gauss():
+    """Generate a standard normal random value (mean=0, sigma=1).
+
+    Uses Box-Muller transform for organic bell-curve distribution.
+    Most values cluster near 0 with rare outliers — much more natural
+    than uniform randomness for humanization.
+    """
+    u1 = max(1e-10, _rand())
+    u2 = _rand()
+    return math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+
+
+# ---------------------------------------------------------------------------
+# Easing functions (normalized t in [0, 1] -> [0, 1])
+# ---------------------------------------------------------------------------
+def _ease_linear(t):
+    return t
+
+
+def _ease_in_quad(t):
+    return t * t
+
+
+def _ease_out_quad(t):
+    return 1.0 - (1.0 - t) * (1.0 - t)
+
+
+def _ease_inout_sine(t):
+    return (1.0 - math.cos(math.pi * t)) / 2.0
+
+
+def _ease_exp_in(t):
+    if t <= 0.0:
+        return 0.0
+    return 2.0 ** (10.0 * (t - 1.0))
+
+
+def _ease_exp_out(t):
+    if t >= 1.0:
+        return 1.0
+    return 1.0 - 2.0 ** (-10.0 * t)
+
+
+def _ease_triangle(t):
+    return 1.0 - abs(2.0 * t - 1.0)
+
+
+EASING_FUNCS = [
+    _ease_linear,
+    _ease_in_quad,
+    _ease_out_quad,
+    _ease_inout_sine,
+    _ease_exp_in,
+    _ease_exp_out,
+    _ease_triangle,
+    None,  # Random — handled separately
+]
+
+
+# ---------------------------------------------------------------------------
+# Math helpers
+# ---------------------------------------------------------------------------
+def _clamp(x, lo, hi):
+    if x < lo:
+        return lo
+    if x > hi:
+        return hi
+    return x
+
+
+def _lerp(a, b, t):
+    """Linear interpolation from a to b by t."""
+    return a + (b - a) * t
+
+
+# ---------------------------------------------------------------------------
+# Pitch-mapped next-note lookup (O(n log n) total)
+# ---------------------------------------------------------------------------
+def _build_pitch_buckets(notes, note_indices):
+    """Build a dictionary mapping pitch -> list of indices into notes[].
+
+    Each bucket is already time-sorted because notes[] is time-sorted.
+    Returns pitch_buckets and a position map for O(1) in-bucket lookup.
+    """
+    pitch_buckets = {}
+    # pos_in_bucket[i] = position of notes[i] within its pitch bucket
+    pos_in_bucket = [0] * len(notes)
+    for i in note_indices:
+        n = notes[i]
+        bucket = pitch_buckets.get(n.number)
+        if bucket is None:
+            bucket = []
+            pitch_buckets[n.number] = bucket
+        pos_in_bucket[i] = len(bucket)
+        bucket.append(i)
+    return pitch_buckets, pos_in_bucket
+
+
+def _find_next_same_pitch(notes, pitch_buckets, pos_in_bucket, idx):
+    """Find the start time of the next note at the same pitch.
+
+    O(1) lookup using pre-built pitch buckets.
+    Returns None if no subsequent note exists at this pitch.
+    """
+    n = notes[idx]
+    bucket = pitch_buckets.get(n.number)
+    if bucket is None:
+        return None
+    pos = pos_in_bucket[idx]
+    if pos + 1 < len(bucket):
+        return notes[bucket[pos + 1]].time
+    return None
+
+
+def _find_next_any(notes, sorted_indices, time_pos, idx):
+    """Find the start time of the next note (any pitch) after notes[idx].
+
+    Uses a pre-sorted time position map for O(1) lookup.
+    Returns None if this is the last note.
+    """
+    pos = time_pos[idx]
+    if pos + 1 < len(sorted_indices):
+        return notes[sorted_indices[pos + 1]].time
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Control Surface .fst support
+# ---------------------------------------------------------------------------
+_FST_FILE = 'Note Length Shaper.fst'
+
+
+def _try_load_surface():
+    """Attempt to load the Control Surface .fst GUI."""
+    try:
+        form = flp.LoadSurface(_FST_FILE)
+        if form is not None:
+            return form
+    except Exception:
+        pass
+    return None
+
+
+def _build_standard_dialog():
+    """Build the standard ScriptDialog fallback UI."""
+    form = flp.ScriptDialog(
+        'Note Length Shaper Pro',
+        'Adjusts note lengths for better articulation and feel.\r\n\r\n'
+        'Percentage: Scale note lengths by a percentage.\r\n'
+        'Staccato: Short punchy notes (adjustable tightness).\r\n'
+        'Legato: Extend notes to connect to the next note.\r\n'
+        'Fill Gap: Fill a percentage of the gap to the next note.\r\n'
+        'Curve: Gradually change lengths over time using easing functions.\r\n'
+        'Humanize: Add organic Gaussian-distributed length variation.\r\n'
+        'Quantize: Snap lengths to the nearest grid value.\r\n\r\n'
+        'Legato Target: Same Pitch connects to the next note of the\r\n'
+        'same pitch (polyphonic-safe). Any Note connects to the\r\n'
+        'absolute next note (monophonic mode).\r\n\r\n'
+        'Non-destructive: modifies lengths in-place, preserving undo history\r\n'
+        'and all note properties (slide, porta, velocity, color, etc).'
+    )
+    # --- Mode ---
+    form.AddInputCombo('Mode', LENGTH_MODES, 0)
+    form.AddInputCombo('Legato Target', LEGATO_TARGETS, 0)
+    form.AddInputKnob('Amount (%)', 0.50, 0.01, 2.00)
+    form.AddInputCombo('Fixed Grid', GRID_VALUES, 4)
+    # --- Curve ---
+    form.AddInputCombo('Curve Type', CURVE_TYPES, 0)
+    form.AddInputKnob('Curve Min Factor', 0.3, 0.05, 1.0)
+    form.AddInputKnob('Curve Max Factor', 2.0, 1.0, 4.0)
+    # --- Options ---
+    form.AddInputKnob('Min Length (%)', 0.05, 0.01, 0.50)
+    form.AddInputKnobInt('Overlap (ticks)', 10, 0, 100)
+    form.AddInputKnob('Humanize', 0.20, 0.00, 1.00)
+    form.AddInputKnobInt('Seed', 0, 0, 9999)
+    form.AddInputCheckbox('Ignore Muted Notes', True)
+    form.AddInputCheckbox('Selected Notes Only', True)
+    return form
+
+
+def createDialog():
+    """Try Control Surface first, fall back to ScriptDialog."""
+    form = _try_load_surface()
+    if form is not None:
+        return form
+    return _build_standard_dialog()
+
+
+# ---------------------------------------------------------------------------
+# Apply — in-place mutation, pitch-mapped, Gaussian, easing
+# ---------------------------------------------------------------------------
+def apply(form):
+    mode = int(form.GetInputValue('Mode'))
+    legato_target = int(form.GetInputValue('Legato Target'))
+    amount = form.GetInputValue('Amount (%)')
+    grid_idx = int(form.GetInputValue('Fixed Grid'))
+    curve_type = int(form.GetInputValue('Curve Type'))
+    curve_min = _clamp(form.GetInputValue('Curve Min Factor'), 0.05, 4.0)
+    curve_max = _clamp(form.GetInputValue('Curve Max Factor'), 0.05, 4.0)
+    min_length_pct = form.GetInputValue('Min Length (%)')
+    overlap_ticks = int(form.GetInputValue('Overlap (ticks)'))
+    humanize_amt = _clamp(form.GetInputValue('Humanize'), 0.0, 1.0)
+    seed = int(form.GetInputValue('Seed'))
+    ignore_muted = bool(form.GetInputValue('Ignore Muted Notes'))
+    selected_only = bool(form.GetInputValue('Selected Notes Only'))
+
+    ppq = flp.score.PPQ
+
+    # Ensure curve_min <= curve_max
+    if curve_min > curve_max:
+        curve_min, curve_max = curve_max, curve_min
+
+    # Grid step lookup
+    grid_steps = [
+        ppq * 4,       # 1 Bar
+        ppq * 2,       # 1/2 Note
+        ppq,           # 1/4 Note
+        ppq // 2,      # 1/8 Note
+        ppq // 4,      # 1/16 Note
+        ppq // 8,      # 1/32 Note
+        ppq * 2 // 3,  # 1/4 Triplet
+        ppq // 3,      # 1/8 Triplet
+        ppq // 6,      # 1/16 Triplet
+    ]
+    grid_step = max(1, grid_steps[grid_idx])
+
+    # Minimum note length in ticks
+    min_length = max(1, int(ppq * min_length_pct))
+
+    # Collect note references (in-place mutation — getNote returns mutable ref)
+    all_notes = []
+    process_indices = []
+    for i in range(flp.score.noteCount):
+        n = flp.score.getNote(i)
+        all_notes.append(n)
+        if ignore_muted:
+            try:
+                if n.muted:
+                    continue
+            except Exception:
+                pass
+        if selected_only and not n.selected:
+            continue
+        process_indices.append(i)
+
+    if not process_indices:
+        return
+
+    # Sort processing indices by time then pitch for stable ordering
+    process_indices.sort(key=lambda i: (all_notes[i].time, all_notes[i].number))
+
+    # Seed RNG deterministically from immutable properties + user seed
+    rng_seed = seed
+    for i in process_indices:
+        rng_seed = (rng_seed + all_notes[i].time + all_notes[i].number) & 0x7FFFFFFF
+    _seed(max(1, rng_seed))
+
+    # Build pitch-mapped lookup for legato/fill modes (O(n log n))
+    pitch_buckets, pos_in_bucket = _build_pitch_buckets(all_notes, process_indices)
+
+    # Build time-sorted position map for "Any Note" legato
+    time_pos = [0] * len(all_notes)
+    for rank, i in enumerate(process_indices):
+        time_pos[i] = rank
+
+    # Time range for curve calculations
+    min_time = all_notes[process_indices[0]].time
+    max_time = all_notes[process_indices[-1]].time
+    time_range = max(1, max_time - min_time)
+
+    # --- Helper: find next note time based on legato target ---
+    def find_next_time(idx):
+        if legato_target == 0:  # Same Pitch
+            return _find_next_same_pitch(all_notes, pitch_buckets,
+                                         pos_in_bucket, idx)
+        else:  # Any Note
+            return _find_next_any(all_notes, process_indices, time_pos, idx)
+
+    # Process each note IN-PLACE
+    for rank, idx in enumerate(process_indices):
+        note = all_notes[idx]
+        new_length = note.length
+
+        if mode == 0:    # Percentage
+            new_length = int(note.length * amount)
+
+        elif mode == 1:  # Fixed Length
+            new_length = grid_step
+
+        elif mode == 2:  # Staccato
+            staccato_len = int(grid_step * amount)
+            new_length = min(note.length, max(min_length, staccato_len))
+
+        elif mode == 3:  # Legato (extend to next note)
+            next_time = find_next_time(idx)
+            if next_time is not None and next_time > note.time:
+                new_length = next_time - note.time
+
+        elif mode == 4:  # Legato with Overlap
+            next_time = find_next_time(idx)
+            if next_time is not None and next_time > note.time:
+                new_length = next_time - note.time + overlap_ticks
+
+        elif mode == 5:  # Fill Gap
+            next_time = find_next_time(idx)
+            if next_time is not None and next_time > note.time:
+                gap = next_time - (note.time + note.length)
+                if gap > 0:
+                    new_length = note.length + int(gap * amount)
+
+        elif mode == 6:  # Curve Over Time
+            t = (note.time - min_time) / time_range if time_range > 0 else 0.0
+            t = _clamp(t, 0.0, 1.0)
+
+            if curve_type < len(EASING_FUNCS) and EASING_FUNCS[curve_type] is not None:
+                eased = EASING_FUNCS[curve_type](t)
+            elif curve_type == 7:  # Random (Seeded)
+                eased = _rand01(seed, note.time, note.number, rank)
+            else:
+                eased = t
+
+            factor = _lerp(curve_min, curve_max, eased)
+            new_length = int(note.length * factor * amount)
+
+        elif mode == 7:  # Humanize Lengths
+            z = _gauss()
+            # sigma scales with humanize amount: 0.25 max deviation at full
+            sigma = humanize_amt * 0.25
+            factor = 1.0 + z * sigma
+            # Clamp factor to prevent extreme outliers
+            factor = _clamp(factor, 0.5, 1.5)
+            new_length = int(note.length * factor)
+
+        elif mode == 8:  # Quantize to Grid
+            steps = max(1, round(note.length / grid_step))
+            new_length = steps * grid_step
+
+        # Enforce minimum length
+        new_length = max(min_length, new_length)
+
+        # Mutate in-place — preserves all note properties automatically
+        note.length = new_length

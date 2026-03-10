@@ -1,0 +1,541 @@
+"""Ghost Note Generator Pro - Context-aware rhythmic ghost note engine.
+
+Creates quieter, shorter notes between existing notes to add groove
+and human feel. Features Euclidean rhythm distribution, Gaussian
+micro-timing jitter, proximity-based velocity phrasing, diatonic
+scale-aware pitch variation, and bounding-box collision detection.
+
+Enhanced from audit recommendations for production-grade groove design.
+"""
+
+import flpianoroll as flp
+import math
+
+
+# ---------------------------------------------------------------------------
+# Mode and option definitions
+# ---------------------------------------------------------------------------
+PLACEMENT_MODES = [
+    'Eighth Notes',
+    'Sixteenth Notes',
+    'Triplets',
+    'Between Notes Only',
+    'Offbeat Only',
+    'Syncopated',
+    'Random Scatter',
+    'Euclidean',
+]
+
+PITCH_MODES = [
+    'Same as Source',
+    'Alternating Octave Down',
+    'Random Nearby (diatonic)',
+    'Fixed Note (set below)',
+]
+
+GHOST_COLOR_OPTIONS = [
+    'Same as Source',
+    'Color 1',
+    'Color 2',
+    'Color 3',
+    'Color 4',
+    'Color 5',
+    'Color 6',
+    'Color 7',
+    'Color 8',
+    'Color 9',
+    'Color 10',
+    'Color 11',
+    'Color 12',
+    'Color 13',
+    'Color 14',
+    'Color 15',
+    'Color 16',
+]
+
+
+# ---------------------------------------------------------------------------
+# LCG random & Box-Muller Gaussian (no stdlib random available)
+# ---------------------------------------------------------------------------
+_rng_state = 12345
+
+
+def _rand():
+    """Return uniform random float in [0, 1)."""
+    global _rng_state
+    _rng_state = (_rng_state * 1103515245 + 12345) & 0x7FFFFFFF
+    return _rng_state / 0x7FFFFFFF
+
+
+def _seed(val):
+    global _rng_state
+    _rng_state = max(1, int(val) & 0x7FFFFFFF)
+
+
+def _gauss(mu, sigma):
+    """Box-Muller transform for Gaussian random."""
+    u1 = max(1e-10, _rand())
+    u2 = _rand()
+    z = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+    return mu + sigma * z
+
+
+# ---------------------------------------------------------------------------
+# Diatonic scale helper
+# ---------------------------------------------------------------------------
+def _parse_scale_bitmask():
+    """Parse the C-aligned scale bitmask from the piano roll.
+
+    Returns a list of 12 ints where 0 = in scale, 1 = out of scale.
+    Returns None if no scale is set.
+    """
+    try:
+        helper = flp.score.snap_scale_helper
+        if not helper or helper.strip() == '':
+            return None
+        bits = [int(x.strip()) for x in helper.split(',')]
+        if len(bits) != 12:
+            return None
+        if 1 not in bits:
+            return None
+        return bits
+    except Exception:
+        return None
+
+
+def _build_diatonic_array(scale_bits):
+    """Build sorted array of all MIDI note numbers that are in-scale.
+
+    Uses the C-aligned bitmask: index 0 = C, 1 = C#, ..., 11 = B.
+    scale_bits[pc] == 0 means in-scale.
+    """
+    if scale_bits is None:
+        return None
+    notes = []
+    for midi in range(132):  # 0-131 FL Studio range
+        pc = midi % 12
+        if scale_bits[pc] == 0:
+            notes.append(midi)
+    return notes
+
+
+def _diatonic_offset(pitch, steps, diatonic_notes):
+    """Offset a pitch by N diatonic scale degrees.
+
+    Finds the pitch in the diatonic array, shifts the INDEX by 'steps',
+    and returns the new pitch. This guarantees movement by scale degrees
+    rather than chromatic semitones.
+    """
+    if diatonic_notes is None or len(diatonic_notes) < 2:
+        # Fallback to chromatic
+        return max(0, min(131, pitch + steps))
+
+    # Find the nearest diatonic note to the source pitch
+    best_idx = 0
+    best_dist = 999
+    for i, dn in enumerate(diatonic_notes):
+        dist = abs(dn - pitch)
+        if dist < best_dist:
+            best_dist = dist
+            best_idx = i
+
+    # Apply the step offset to the index
+    new_idx = best_idx + steps
+    new_idx = max(0, min(len(diatonic_notes) - 1, new_idx))
+    return diatonic_notes[new_idx]
+
+
+# ---------------------------------------------------------------------------
+# Bjorklund's Euclidean rhythm algorithm
+# ---------------------------------------------------------------------------
+def _bjorklund(pulses, steps):
+    """Generate a Euclidean rhythm pattern E(pulses, steps).
+
+    Returns a list of booleans of length 'steps' where True = onset.
+    Distributes 'pulses' onsets as evenly as possible across 'steps'.
+    """
+    if pulses <= 0 or steps <= 0:
+        return []
+    if pulses >= steps:
+        return [True] * steps
+
+    # Bjorklund's algorithm using the Euclidean method
+    pattern = []
+    counts = []
+    remainders = []
+
+    divisor = steps - pulses
+    remainders.append(pulses)
+    level = 0
+
+    while True:
+        counts.append(divisor // remainders[level])
+        new_remainder = divisor % remainders[level]
+        remainders.append(new_remainder)
+        divisor = remainders[level]
+        level += 1
+        if remainders[level] <= 1:
+            break
+
+    counts.append(divisor)
+
+    def _build(lvl):
+        if lvl == -1:
+            pattern.append(False)
+            return
+        if lvl == -2:
+            pattern.append(True)
+            return
+        for _ in range(counts[lvl]):
+            _build(lvl - 1)
+        if remainders[lvl] != 0:
+            _build(lvl - 2)
+
+    _build(level)
+
+    # Rotate so first element is True (onset)
+    if pattern and not pattern[0]:
+        try:
+            first_true = pattern.index(True)
+            pattern = pattern[first_true:] + pattern[:first_true]
+        except ValueError:
+            pass
+
+    return pattern
+
+
+# ---------------------------------------------------------------------------
+# Bounding-box collision detection
+# ---------------------------------------------------------------------------
+def _overlaps_any(pitch, start, end, notes):
+    """Check if a candidate note overlaps any existing note on the same pitch.
+
+    Uses 2D bounding-box logic: pitch as Y-axis, time as X-axis.
+    Short-circuits on first overlap found.
+    """
+    return any(
+        n.number == pitch and start < n.time + n.length and end > n.time
+        for n in notes
+    )
+
+
+# ---------------------------------------------------------------------------
+# Control Surface .fst support
+# ---------------------------------------------------------------------------
+_FST_FILE = 'Ghost Note Generator.fst'
+
+
+def _try_load_surface():
+    """Attempt to load the Control Surface .fst GUI."""
+    try:
+        form = flp.LoadSurface(_FST_FILE)
+        if form is not None:
+            return form
+    except Exception:
+        pass
+    return None
+
+
+def _build_standard_dialog():
+    """Build the standard ScriptDialog fallback UI."""
+    form = flp.ScriptDialog(
+        'Ghost Note Generator Pro',
+        'Context-aware ghost note engine with groove intelligence.\r\n\r\n'
+        'PLACEMENT: 8 modes including Euclidean rhythm distribution.\r\n'
+        'Euclidean mode uses Bjorklund\'s algorithm for mathematically\r\n'
+        'balanced pulse spacing (E(k,n) patterns like tresillo).\r\n\r\n'
+        'VELOCITY: Proximity-based phrasing — ghosts approaching the\r\n'
+        'next accent crescendo naturally (simulates stick lift).\r\n\r\n'
+        'PITCH: Diatonic scale-aware variation uses piano roll scale\r\n'
+        'highlighting for harmonically safe pitch offsets.\r\n\r\n'
+        'HUMANIZE: Gaussian micro-timing jitter clusters naturally\r\n'
+        'around the grid (tight center, rare outliers).\r\n\r\n'
+        'COLLISION: Bounding-box overlap detection — no false positives.'
+    )
+    # --- Placement ---
+    form.AddInputCombo('Placement', PLACEMENT_MODES, 1)
+    form.AddInputKnobInt('Euclidean Pulses', 3, 1, 16)
+    # --- Pitch ---
+    form.AddInputCombo('Pitch Mode', PITCH_MODES, 0)
+    form.AddInputKnobInt('Fixed Note (C5=60)', 60, 0, 131)
+    # --- Dynamics ---
+    form.AddInputKnob('Velocity (%)', 0.35, 0.05, 0.80)
+    form.AddInputKnob('Length (%)', 0.50, 0.10, 1.00)
+    form.AddInputKnob('Density (%)', 0.75, 0.10, 1.00)
+    # --- Humanize ---
+    form.AddInputKnob('Humanize', 0.25, 0.00, 1.00)
+    # --- Routing ---
+    form.AddInputCombo('Ghost Color', GHOST_COLOR_OPTIONS, 0)
+    # --- Options ---
+    form.AddInputCheckbox('Avoid Existing Notes', True)
+    form.AddInputCheckbox('Selected Notes Only', True)
+    return form
+
+
+def createDialog():
+    """Try Control Surface first, fall back to ScriptDialog."""
+    form = _try_load_surface()
+    if form is not None:
+        return form
+    return _build_standard_dialog()
+
+
+# ---------------------------------------------------------------------------
+# Apply — context-aware, collision-safe, additive commit
+# ---------------------------------------------------------------------------
+def apply(form):
+    placement = int(form.GetInputValue('Placement'))
+    euclidean_pulses = int(form.GetInputValue('Euclidean Pulses'))
+    pitch_mode = int(form.GetInputValue('Pitch Mode'))
+    fixed_note = int(form.GetInputValue('Fixed Note (C5=60)'))
+    ghost_vel = form.GetInputValue('Velocity (%)')
+    ghost_len_pct = form.GetInputValue('Length (%)')
+    density = form.GetInputValue('Density (%)')
+    humanize = form.GetInputValue('Humanize')
+    ghost_color_idx = int(form.GetInputValue('Ghost Color'))
+    avoid_existing = bool(form.GetInputValue('Avoid Existing Notes'))
+    selected_only = bool(form.GetInputValue('Selected Notes Only'))
+
+    ppq = flp.score.PPQ
+
+    # Ghost color: 0 = same as source, 1-16 = specific color (0-15)
+    ghost_color = None if ghost_color_idx == 0 else (ghost_color_idx - 1)
+
+    # Parse diatonic scale for pitch mode 2
+    scale_bits = _parse_scale_bitmask()
+    diatonic_notes = _build_diatonic_array(scale_bits) if scale_bits else None
+
+    # Collect notes
+    source_notes = []
+    all_existing = []
+    for i in range(flp.score.noteCount):
+        note = flp.score.getNote(i)
+        all_existing.append(note)
+        if selected_only and not note.selected:
+            pass  # Leave unselected notes untouched
+        else:
+            source_notes.append(note)
+
+    if not source_notes:
+        return
+
+    # Seed RNG from note data for reproducible results
+    _seed(sum(n.time + n.number for n in source_notes) + len(source_notes))
+
+    # Determine grid step based on placement mode
+    if placement == 0:      # Eighth Notes
+        grid_step = ppq // 2
+    elif placement == 1:    # Sixteenth Notes
+        grid_step = ppq // 4
+    elif placement == 2:    # Triplets
+        grid_step = ppq // 3
+    elif placement == 3:    # Between Notes Only
+        grid_step = ppq // 4
+    elif placement == 4:    # Offbeat Only
+        grid_step = ppq // 2
+    elif placement == 5:    # Syncopated
+        grid_step = ppq // 4
+    elif placement == 6:    # Random Scatter
+        grid_step = ppq // 4
+    elif placement == 7:    # Euclidean
+        grid_step = ppq // 4
+    else:
+        grid_step = ppq // 4
+
+    ghost_length = max(1, int(grid_step * ghost_len_pct))
+
+    # Group source notes by approximate time to find "hits"
+    tolerance = ppq // 8
+    note_groups = []
+    sorted_notes = sorted(source_notes, key=lambda n: n.time)
+
+    current_group = [sorted_notes[0]]
+    for n in sorted_notes[1:]:
+        if n.time - current_group[0].time <= tolerance:
+            current_group.append(n)
+        else:
+            note_groups.append(current_group)
+            current_group = [n]
+    note_groups.append(current_group)
+
+    # Track all notes for collision (existing + newly generated)
+    collision_notes = list(all_existing)
+
+    # Generate ghost notes
+    new_ghosts = []
+
+    for g_idx in range(len(note_groups)):
+        group = note_groups[g_idx]
+        group_time = group[0].time
+
+        # End time: start of next group or end of current notes
+        if g_idx + 1 < len(note_groups):
+            next_time = note_groups[g_idx + 1][0].time
+        else:
+            next_time = max(n.time + n.length for n in group)
+
+        gap = next_time - group_time
+        if gap <= grid_step:
+            continue
+
+        # Generate candidate positions within the gap
+        candidates = []
+
+        if placement == 7:  # Euclidean
+            # Calculate available slots in this gap
+            num_slots = max(1, gap // grid_step)
+            pulses = min(euclidean_pulses, num_slots)
+            pattern = _bjorklund(pulses, num_slots)
+
+            for slot_idx, is_onset in enumerate(pattern):
+                if is_onset:
+                    t = group_time + (slot_idx + 1) * grid_step
+                    if t < next_time:
+                        candidates.append(t)
+
+        elif placement == 3:  # Between Notes Only
+            t = group_time + grid_step
+            while t < next_time - grid_step // 2:
+                candidates.append(t)
+                t += grid_step
+
+        elif placement == 4:  # Offbeat Only
+            t = group_time + grid_step
+            while t < next_time - grid_step // 2:
+                candidates.append(t)
+                t += grid_step * 2
+
+        elif placement == 5:  # Syncopated
+            t = group_time + grid_step
+            step_idx = 0
+            while t < next_time - grid_step // 2:
+                if step_idx % 2 == 0:
+                    candidates.append(t)
+                step_idx += 1
+                t += grid_step
+
+        elif placement == 6:  # Random Scatter
+            t = group_time + grid_step // 2
+            while t < next_time - grid_step // 2:
+                offset = int(_gauss(0, grid_step * 0.15))
+                pos = t + offset
+                if group_time < pos < next_time:
+                    candidates.append(pos)
+                t += grid_step
+
+        else:  # Regular grid (Eighth, Sixteenth, Triplets)
+            t = group_time + grid_step
+            while t < next_time - grid_step // 2:
+                candidates.append(t)
+                t += grid_step
+
+        # Create ghost notes at candidate positions
+        for cand_time in candidates:
+            # Density check (skip for Euclidean — it handles its own distribution)
+            if placement != 7 and _rand() > density:
+                continue
+
+            # Pick a reference note from the group
+            ref = group[int(_rand() * len(group)) % len(group)]
+
+            # Determine pitch
+            if pitch_mode == 0:      # Same as Source
+                pitch = ref.number
+            elif pitch_mode == 1:    # Alternating Octave Down
+                pitch = ref.number - 12 if int(_rand() * 2) == 0 else ref.number
+            elif pitch_mode == 2:    # Random Nearby (diatonic)
+                steps = int((_rand() - 0.5) * 4)  # -2 to +2 scale degrees
+                if diatonic_notes is not None:
+                    pitch = _diatonic_offset(ref.number, steps, diatonic_notes)
+                else:
+                    # Fallback to chromatic if no scale set
+                    pitch = ref.number + steps
+            elif pitch_mode == 3:    # Fixed Note
+                pitch = fixed_note
+            else:
+                pitch = ref.number
+
+            # Clamp to FL Studio MIDI range (0-131)
+            pitch = max(0, min(131, pitch))
+
+            # Apply Gaussian humanize to timing
+            time_offset = 0
+            if humanize > 0:
+                sigma = grid_step * 0.08 * humanize
+                time_offset = int(_gauss(0, sigma))
+
+            final_time = max(0, cand_time + time_offset)
+
+            # Bounding-box collision detection
+            if avoid_existing:
+                ghost_end = final_time + ghost_length
+                if _overlaps_any(pitch, final_time, ghost_end, collision_notes):
+                    continue
+
+            # Proximity-based velocity phrasing
+            # Calculate position within the gap (0.0 = start, 1.0 = near next accent)
+            gap_length = max(1, next_time - group_time)
+            proximity = (cand_time - group_time) / gap_length
+
+            # Crescendo: ghosts approaching next accent get louder
+            vel_boost = proximity * 0.15  # Up to 15% boost near accent
+
+            # Base velocity with Gaussian variation
+            vel_variation = 0.0
+            if humanize > 0:
+                vel_variation = _gauss(0, 0.05 * humanize)
+
+            final_vel = ref.velocity * ghost_vel * (1.0 + vel_boost) + vel_variation
+            final_vel = max(0.01, min(0.95, final_vel))
+
+            # Determine color
+            note_color = ghost_color if ghost_color is not None else ref.color
+
+            # Create the ghost note with all properties safely initialized
+            ghost = flp.Note()
+            ghost.number = pitch
+            ghost.time = final_time
+            ghost.length = ghost_length
+            ghost.velocity = final_vel
+            ghost.color = note_color
+            ghost.pan = ref.pan
+            ghost.fcut = ref.fcut
+            ghost.fres = ref.fres
+            ghost.group = ref.group
+            ghost.selected = True  # Selection isolation: ghosts are selected
+
+            # Explicitly set slide/porta to False to prevent pitch bending
+            try:
+                ghost.slide = False
+            except Exception:
+                pass
+            try:
+                ghost.porta = False
+            except Exception:
+                pass
+            try:
+                ghost.pitchofs = 0
+            except Exception:
+                pass
+            try:
+                ghost.muted = False
+            except Exception:
+                pass
+            try:
+                ghost.release = ref.release
+            except Exception:
+                pass
+            try:
+                ghost.repeats = 0
+            except Exception:
+                pass
+
+            new_ghosts.append(ghost)
+
+            # Add to collision tracking to prevent self-overlaps
+            collision_notes.append(ghost)
+
+    # --- Non-destructive additive commit ---
+    # Ghost generator only ADDS notes. Existing notes stay untouched.
+    for ghost in new_ghosts:
+        flp.score.addNote(ghost)
