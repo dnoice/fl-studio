@@ -1,0 +1,395 @@
+===========================================================================
+  VELOCITY CURVES PRO — Control Surface (.fst) Build Guide
+===========================================================================
+
+  This guide tells you exactly how to build the custom GUI in FL Studio's
+  Control Surface plugin. When done, the script auto-detects and uses it.
+  If the .fst file is missing, the script falls back to the standard dialog.
+
+  REQUIREMENTS: FL Studio 24.1.0 or later (LoadSurface API)
+
+===========================================================================
+  STEP 1: CREATE THE CONTROL SURFACE PRESET
+===========================================================================
+
+  1. Open FL Studio
+  2. Add a new "Control Surface" plugin instance (Add > More Plugins)
+  3. Right-click the Control Surface title bar > choose a dark background
+  4. Build the layout described below using drag-and-drop controls
+  5. When done: Presets menu > "Save preset as..." >
+     Save as: "Velocity Curves.fst"
+  6. Copy the .fst file to your piano roll scripts folder:
+     Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  The script looks for a file named exactly: "Velocity Curves.fst"
+
+===========================================================================
+  STEP 2: LAYOUT — FOUR ZONES
+===========================================================================
+
+  +------------------+------------------+------------------+------------------+
+  |  ZONE 1: CURVE   |  ZONE 2: BEZIER  |  ZONE 3: ACCENT  |  ZONE 4: OPTIONS |
+  |  & SHAPE         |  CONTROL POINTS  |  & HUMANIZE      |  & BEHAVIOR      |
+  +------------------+------------------+------------------+------------------+
+
+---------------------------------------------------------------------------
+  ZONE 1: CURVE & SHAPE (left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)         | Range / Options        | Default
+  ------------------|----------------------|------------------------|--------
+  Knob (integer)    | Curve Type           | 0-7 (8 curve modes)    | 0
+  Knob              | Start Velocity       | 0.00 to 1.00           | 0.30
+  Knob              | End Velocity         | 0.00 to 1.00           | 1.00
+  Knob              | Tension              | -1.00 to 1.00          | 0.00
+  Knob              | Strength             | 0.00 to 1.00           | 1.00
+  Knob              | Sine Cycles          | 0.25 to 8.00           | 1.00
+
+  CURVE TYPE VALUES:
+    0 = Linear (Tension) — with FL Studio native tension parameter
+    1 = S-Curve (Tension) — sigmoidal double curve
+    2 = Sine Wave — oscillating with configurable cycles
+    3 = Cosine Fade — smooth half-cosine transition
+    4 = Triangle — peak at center, taper to edges
+    5 = Bezier — cubic Bezier with user control points
+    6 = Euclidean Accent — Bjorklund accent pattern (time-sig aware)
+    7 = Humanize Only — Gaussian jitter on existing velocities
+
+  TENSION:
+  - Controls the curve shape for Linear and S-Curve modes
+  - 0.0 = perfectly linear (straight line)
+  - Positive = ease-in (convex) — slow start, fast end
+  - Negative = ease-out (concave) — fast start, slow end
+  - Uses FL Studio's exact native automation tension formula:
+    f(t, R) = (2^(-10Rt) - 1) / (2^(-10R) - 1)
+  - This means your script curves match FL's own automation shapes
+
+  START/END VELOCITY:
+  - The velocity range that the curve maps to
+  - Start Velocity = value at the beginning of the selection
+  - End Velocity = value at the end of the selection
+  - Swap them to reverse the direction (e.g., decrescendo)
+  - Example: Start=0.3, End=1.0 → crescendo from soft to loud
+
+  STRENGTH:
+  - Blends between original velocity and the curve target
+  - 0.0 = no change (original velocity preserved)
+  - 1.0 = fully apply the curve
+  - 0.5 = halfway blend (subtle application)
+
+  SINE CYCLES:
+  - Number of complete sine wave cycles across the selection
+  - Only affects Sine Wave mode (mode 2)
+  - 1.0 = one full cycle, 0.25 = quarter cycle, 4.0 = four cycles
+
+---------------------------------------------------------------------------
+  ZONE 2: BEZIER CONTROL POINTS (center-left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)         | Range          | Default
+  ------------------|----------------------|----------------|--------
+  Knob              | Bezier X1            | 0.00 to 1.00   | 0.25
+  Knob              | Bezier Y1            | 0.00 to 1.00   | 0.00
+  Knob              | Bezier X2            | 0.00 to 1.00   | 0.75
+  Knob              | Bezier Y2            | 0.00 to 1.00   | 1.00
+
+  BEZIER CONTROL POINTS:
+  - Only affect Bezier mode (mode 5)
+  - P0=(0,0) and P3=(1,1) are fixed (start and end anchors)
+  - P1=(X1, Y1) controls the entry slope
+  - P2=(X2, Y2) controls the exit slope
+  - Uses Newton-Raphson numerical solver (8 iterations)
+  - Can create asymmetric curves impossible with tension alone
+
+  COMMON BEZIER PRESETS:
+  - Ease-in:  X1=0.42 Y1=0.00 X2=1.00 Y2=1.00
+  - Ease-out: X1=0.00 Y1=0.00 X2=0.58 Y2=1.00
+  - Ease-in-out: X1=0.42 Y1=0.00 X2=0.58 Y2=1.00
+  - Linear:   X1=0.25 Y1=0.25 X2=0.75 Y2=0.75
+  - Bounce:   X1=0.50 Y1=0.00 X2=0.50 Y2=1.00
+
+---------------------------------------------------------------------------
+  ZONE 3: ACCENT & HUMANIZE (center-right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)            | Range          | Default
+  ------------------|-------------------------|----------------|--------
+  Knob (integer)    | Accent Count            | 1 to 16        | 3
+  Knob              | Accent Boost            | 0.00 to 0.50   | 0.20
+  Knob              | Humanize                | 0.00 to 1.00   | 0.00
+  Knob (integer)    | Seed                    | 0 to 9999      | 0
+
+  ACCENT COUNT:
+  - Number of accented beats per measure for Euclidean Accent mode
+  - Distributed via Bjorklund's algorithm for maximal evenness
+  - E(3, 4) in 4/4 = accents on beats 1, 2, 3 (not 4)
+  - E(2, 3) in 3/4 = accents on beats 1 and 3
+  - E(3, 7) in 7/8 = classic 2+2+3 grouping
+
+  ACCENT BOOST:
+  - Velocity increase for accented positions
+  - De-accented positions get half the boost subtracted
+  - 0.20 = accent notes +0.20, non-accent notes -0.10
+  - Only affects Euclidean Accent mode
+
+  HUMANIZE:
+  - Gaussian velocity jitter overlay — works with ALL curve modes
+  - 0.0 = no jitter (perfectly clean curve)
+  - 1.0 = maximum jitter (~15% standard deviation)
+  - Uses Box-Muller Gaussian distribution:
+    68% of notes within 1σ, 95% within 2σ of target
+  - Much more natural than uniform random scatter
+  - Essential for making programmed dynamics sound human
+
+  SEED:
+  - Controls deterministic random seed for Humanize jitter
+  - Same seed + same notes = identical result every time
+  - Preview always matches accept (no more guessing)
+  - Change seed to explore different humanization patterns
+
+---------------------------------------------------------------------------
+  ZONE 4: OPTIONS & BEHAVIOR (right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)            | Range          | Default
+  ------------------|-------------------------|----------------|--------
+  CheckBox          | Ignore Muted Notes      | 0 or 1         | 1 (on)
+  CheckBox          | Selected Notes Only     | 0 or 1         | 1 (on)
+
+  IGNORE MUTED NOTES:
+  - When ON: muted notes are left completely untouched
+  - When OFF: muted notes are processed like any other note
+
+  SELECTED NOTES ONLY:
+  - When ON: only processes selected notes
+  - When OFF: processes all notes in the piano roll
+
+===========================================================================
+  STEP 3: CONTROL NAMING — CRITICAL
+===========================================================================
+
+  Control names MUST match EXACTLY (case-sensitive, including spaces):
+
+    "Curve Type"
+    "Start Velocity"
+    "End Velocity"
+    "Tension"
+    "Strength"
+    "Sine Cycles"
+    "Bezier X1"
+    "Bezier Y1"
+    "Bezier X2"
+    "Bezier Y2"
+    "Accent Count"
+    "Accent Boost"
+    "Humanize"
+    "Seed"
+    "Ignore Muted Notes"
+    "Selected Notes Only"
+
+===========================================================================
+  STEP 4: VISUAL DESIGN SUGGESTIONS
+===========================================================================
+
+  BACKGROUND:  Dark gray or black (#1a1a1a)
+  LABELS:       "CURVE"    "BEZIER"    "ACCENT"    "OPTIONS"
+  TOTAL SIZE:   ~700 x 350 pixels
+
+  COLOR CODING (optional):
+  - Curve/shape controls:   Blue accent
+  - Bezier control points:  Purple accent
+  - Accent/Humanize:        Orange/amber accent
+  - Options/toggles:        Green accent
+
+===========================================================================
+  STEP 5: UNDERSTANDING THE CURVE MODES
+===========================================================================
+
+  LINEAR (TENSION):
+  - The foundation mode — replaces 5 old modes (Linear, Exponential,
+    Logarithmic, Crescendo, Decrescendo)
+  - Tension=0 → straight line (linear ramp)
+  - Tension=+0.5 → ease-in (slow start, fast end) — like old Exponential
+  - Tension=-0.5 → ease-out (fast start, slow end) — like old Logarithmic
+  - Uses FL Studio's EXACT internal automation tension formula
+  - One knob gives you infinite curve shapes
+
+  S-CURVE (TENSION):
+  - Sigmoidal (double) curve — essential for natural dynamic swells
+  - Piecewise: lower half uses tension ease-in, upper half mirrors
+  - Creates smooth crescendo-decrescendo in a single pass
+  - Tension controls the steepness of the S-shape
+  - Perfect for cinematic string rises, cymbal swells, brass marcato
+
+  SINE WAVE:
+  - Oscillating velocity pattern across the selection
+  - Sine Cycles controls how many full waves
+  - 1 cycle = one up-down-up pattern
+  - Useful for tremolo-like velocity modulation
+
+  COSINE FADE:
+  - Smooth half-cosine transition from start to end velocity
+  - Similar to a sine ease-in-out but always monotonic
+  - Good for gentle, natural-sounding fades
+
+  TRIANGLE:
+  - Velocity peaks at the center of the selection, tapers to edges
+  - Creates a natural swell-and-decay shape
+  - Useful for phrase-level dynamics
+
+  BEZIER:
+  - Cubic Bezier curve with full control over entry and exit slopes
+  - P1 (X1, Y1) shapes the beginning of the curve
+  - P2 (X2, Y2) shapes the end of the curve
+  - Can create asymmetric curves impossible with tension alone
+  - Uses Newton-Raphson solver for precise evaluation
+
+  EUCLIDEAN ACCENT:
+  - Applies accent/de-accent pattern based on Bjorklund's algorithm
+  - Adapts automatically to the project's time signature
+  - In 4/4: Accent Count=3 → accents on beats 1, 2, 3
+  - In 7/8: Accent Count=3 → classic 2+2+3 grouping
+  - Works on any meter (3/4, 5/4, 6/8, 7/8, etc.)
+  - No more broken 4/4-only accent patterns
+
+  HUMANIZE ONLY:
+  - Does NOT apply any curve — preserves existing velocities
+  - Only applies Gaussian jitter to add human-like variation
+  - Use this when your velocities are already shaped but need
+    organic imperfection to sound more natural
+
+===========================================================================
+  STEP 6: UNDERSTANDING THE TENSION FORMULA
+===========================================================================
+
+  The script uses FL Studio's exact internal tension algorithm:
+
+  1. User input v ∈ [-1.0, 1.0]
+
+  2. Map to internal rate R:
+     - v > 0 (ease-in):  R = log2(v + 1) / 10
+     - v < 0 (ease-out): R = -log2(-v + 1) / 10
+     - v = 0 (linear):   bypass formula, return t directly
+
+  3. Core function:
+     f(t, R) = (2^(-10·R·t) - 1) / (2^(-10·R) - 1)
+
+  This ensures that curves from this script are perceptually
+  identical to FL Studio's own automation tension handles.
+
+  WHY THIS MATTERS:
+  - Old script used t^2.5 (arbitrary, fixed exponent)
+  - New script matches FL's actual curve engine
+  - Tension=0 is guaranteed linear (denominator check)
+  - The curve always starts at 0 and ends at 1 (normalized)
+  - Start/End Velocity then maps this [0,1] to your range
+
+===========================================================================
+  STEP 7: TESTING
+===========================================================================
+
+  TENSION CURVE TEST:
+  - Draw 16 notes across one bar, all at velocity 0.5
+  - Set Mode = Linear, Start=0.0, End=1.0, Tension=0, Strength=1.0
+  - Run: notes should ramp linearly from 0.0 to 1.0
+  - Set Tension = +0.8: curve should bow downward (ease-in)
+  - Set Tension = -0.8: curve should bow upward (ease-out)
+
+  S-CURVE TEST:
+  - Same 16 notes at velocity 0.5
+  - Set Mode = S-Curve, Start=0.0, End=1.0, Tension=0.5
+  - Run: should see slow start, rapid middle, slow finish
+  - The midpoint note should be near velocity 0.5
+
+  BEZIER TEST:
+  - Set Mode = Bezier, X1=0.0 Y1=1.0 X2=1.0 Y2=0.0
+  - Run: should produce an "inverted S" — fast start and end,
+    slow middle (the opposite of a normal S-curve)
+  - This shape is impossible with tension alone
+
+  EUCLIDEAN ACCENT TEST (4/4):
+  - Draw 16 sixteenth notes across one bar in a 4/4 project
+  - Set Mode = Euclidean Accent, Accent Count = 4
+  - Run: beats 1, 2, 3, 4 should be accented (louder)
+  - Off-beat sixteenths should be de-accented (softer)
+
+  EUCLIDEAN ACCENT TEST (7/8):
+  - Change project time signature to 7/8
+  - Draw 7 eighth notes across one bar
+  - Set Accent Count = 3
+  - Run: should accent in a 2+2+3 pattern (Bjorklund E(3,7))
+
+  HUMANIZE OVERLAY TEST:
+  - Set Mode = Linear, Start=0.5, End=0.5, Strength=1.0
+  - This flattens all notes to 0.5
+  - Now set Humanize = 0.5
+  - Run: notes should cluster around 0.5 with Gaussian scatter
+  - Most notes within ±0.075 of 0.5, rare outliers further
+
+  HUMANIZE ONLY TEST:
+  - Set Mode = Humanize Only
+  - Draw notes with varied velocities (some quiet, some loud)
+  - Set Humanize = 0.3, run
+  - Original velocity shape should be preserved but with
+    subtle organic variation added to each note
+
+  SEED STABILITY TEST:
+  - Set Seed = 42, Humanize = 0.5, run on any notes
+  - Note the resulting velocities
+  - Undo, run again with same settings
+  - Velocities must be identical
+  - Accept — result must match preview
+
+  STRENGTH BLEND TEST:
+  - Set Mode = Linear, Start=0.0, End=1.0
+  - Set Strength = 0: no velocity change (fully original)
+  - Set Strength = 0.5: halfway between original and curve
+  - Set Strength = 1.0: fully applies the curve
+
+  SINGLE NOTE TEST:
+  - Select a single note
+  - Run any mode — should not crash (zero-division protected)
+  - Note treated at t=0.5 (midpoint of curve)
+
+===========================================================================
+  TROUBLESHOOTING
+===========================================================================
+
+  "Curve looks the same regardless of Tension"
+  - Tension only affects modes 0 (Linear) and 1 (S-Curve)
+  - Other modes ignore the Tension knob
+  - Check that Strength is > 0 (Strength=0 means no change)
+
+  "Bezier mode produces wrong shape"
+  - Make sure X1 < X2 for monotonic curves
+  - If X1 > X2, the curve may loop or produce unexpected shapes
+  - The Newton-Raphson solver assumes monotonic x progression
+  - Try the suggested presets first to get a feel for the controls
+
+  "Euclidean accents don't match my time signature"
+  - The script reads the project's time signature automatically
+  - Make sure your project time signature is set correctly
+  - The accent grid = time signature numerator (e.g., 7 for 7/8)
+  - Accent Count must be ≤ the numerator
+
+  "Humanize sounds too wild / chaotic"
+  - Lower the Humanize value (try 0.1-0.3 for subtle variation)
+  - The Gaussian distribution means most notes stay close to target
+  - Only rare outliers deviate significantly
+  - If it still sounds chaotic, your Humanize value is too high
+
+  "Random results keep changing" (should NOT happen)
+  - The Pro version uses deterministic seeded RNG
+  - Same Seed + same notes = identical result every time
+  - Preview always matches accept
+  - If results differ, check that you haven't changed the Seed
+
+  "I want the old Exponential / Logarithmic modes back"
+  - Use Linear mode with Tension:
+    - Exponential (old t^2.5) ≈ Tension = +0.5
+    - Logarithmic (old) ≈ Tension = -0.5
+    - Crescendo (old t^1.5) ≈ Tension = +0.3
+    - Decrescendo: swap Start/End velocities + Tension = +0.3
+  - The Tension knob gives you ALL of these and more
+
+===========================================================================

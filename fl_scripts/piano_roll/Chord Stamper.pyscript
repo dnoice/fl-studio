@@ -1,62 +1,351 @@
-"""Chord Stamper - Stamp chord shapes onto selected notes in the piano roll.
+"""Chord Stamper Pro - Advanced chord generation with professional voicings.
 
-Select one or more notes, choose a chord type, and this script will
-create a full chord at each selected note position using that note as the root.
+Stamps chord shapes onto selected notes using each note as the root.
+Features extended jazz harmonies (11ths, 13ths, altered dominants),
+Drop 2/3/2&4 open voicings, Gaussian velocity humanization,
+non-linear strum timing, and diatonic scale snapping via the
+FL Studio snap_scale_helper bitmask.
 """
 
 import flpianoroll as flp
+import math
 
 
+# ---------------------------------------------------------------------------
+# Chord Dictionary — practical voicings with proper omissions/alterations
+# ---------------------------------------------------------------------------
 CHORD_INTERVALS = {
-    'Major':          (0, 4, 7),
-    'Minor':          (0, 3, 7),
-    'Diminished':     (0, 3, 6),
-    'Augmented':      (0, 4, 8),
-    'Sus2':           (0, 2, 7),
-    'Sus4':           (0, 5, 7),
-    'Major 7th':      (0, 4, 7, 11),
-    'Minor 7th':      (0, 3, 7, 10),
-    'Dominant 7th':   (0, 4, 7, 10),
-    'Dim 7th':        (0, 3, 6, 9),
-    'Half-Dim 7th':   (0, 3, 6, 10),
-    'Major 9th':      (0, 4, 7, 11, 14),
-    'Minor 9th':      (0, 3, 7, 10, 14),
-    'Dominant 9th':   (0, 4, 7, 10, 14),
-    'Add9':           (0, 4, 7, 14),
-    'Minor Add9':     (0, 3, 7, 14),
-    'Major 6th':      (0, 4, 7, 9),
-    'Minor 6th':      (0, 3, 7, 9),
-    'Power (5th)':    (0, 7),
+    # --- Triads ---
+    'Major':              (0, 4, 7),
+    'Minor':              (0, 3, 7),
+    'Diminished':         (0, 3, 6),
+    'Augmented':          (0, 4, 8),
+    'Sus2':               (0, 2, 7),
+    'Sus4':               (0, 5, 7),
+    # --- Sixths ---
+    'Major 6th':          (0, 4, 7, 9),
+    'Minor 6th':          (0, 3, 7, 9),
+    # --- Seventh chords ---
+    'Major 7th':          (0, 4, 7, 11),
+    'Minor 7th':          (0, 3, 7, 10),
+    'Dominant 7th':       (0, 4, 7, 10),
+    'Dim 7th':            (0, 3, 6, 9),
+    'Half-Dim 7th':       (0, 3, 6, 10),
+    'Min/Maj 7th':        (0, 3, 7, 11),
+    # --- Ninth chords ---
+    'Major 9th':          (0, 4, 7, 11, 14),
+    'Minor 9th':          (0, 3, 7, 10, 14),
+    'Dominant 9th':       (0, 4, 7, 10, 14),
+    'Add9':               (0, 4, 7, 14),
+    'Minor Add9':         (0, 3, 7, 14),
+    # --- 11th chords (practical voicings) ---
+    'Major 11th (Lydian)': (0, 4, 7, 11, 14, 18),   # #11 avoids b9 clash with 3rd
+    'Minor 11th':          (0, 3, 7, 10, 14, 17),
+    'Dominant 11th':       (0, 4, 10, 14, 17),       # 5th omitted to reduce density
+    # --- 13th chords (practical voicings — 5th and 11th omitted) ---
+    'Major 13th':          (0, 4, 11, 14, 21),
+    'Dominant 13th':       (0, 4, 10, 14, 21),
+    'Minor 13th':          (0, 3, 10, 14, 21),
+    # --- Altered dominants ---
+    'Dom 7 b5':           (0, 4, 6, 10),
+    'Dom 7 #5':           (0, 4, 8, 10),
+    'Dom 7 b9':           (0, 4, 7, 10, 13),
+    'Dom 7 #9 (Hendrix)': (0, 4, 7, 10, 15),
+    'Dom 7 #5 b9':        (0, 4, 8, 10, 13),
+    'Dom 7 #5 #9':        (0, 4, 8, 10, 15),
+    'Dom 7 b5 b9':        (0, 4, 6, 10, 13),
+    'Dom 7 b5 #9':        (0, 4, 6, 10, 15),
+    # --- Other ---
+    'Power (5th)':        (0, 7),
+    'Power (5th + Oct)':  (0, 7, 12),
 }
 
 CHORD_NAMES = list(CHORD_INTERVALS.keys())
 
+VOICING_MODES = [
+    'Close (root position)',
+    'Inversion',
+    'Drop 2',
+    'Drop 3',
+    'Drop 2 & 4',
+]
 
-def createDialog():
+SNAP_DIRECTIONS = [
+    'Off',
+    'Nearest',
+    'Up',
+    'Down',
+]
+
+# ---------------------------------------------------------------------------
+# LCG random & Box-Muller Gaussian (no stdlib random available)
+# ---------------------------------------------------------------------------
+_rng_state = 48271
+
+
+def _rand():
+    """Return uniform random float in [0, 1)."""
+    global _rng_state
+    _rng_state = (_rng_state * 1103515245 + 12345) & 0x7FFFFFFF
+    return _rng_state / 0x7FFFFFFF
+
+
+def _seed(val):
+    global _rng_state
+    _rng_state = max(1, int(val) & 0x7FFFFFFF)
+
+
+def _gauss(mu, sigma):
+    """Box-Muller transform for Gaussian random using LCG."""
+    u1 = max(1e-10, _rand())
+    u2 = _rand()
+    z = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+    return mu + sigma * z
+
+
+# ---------------------------------------------------------------------------
+# Scale snapping via snap_scale_helper bitmask
+# ---------------------------------------------------------------------------
+def _parse_scale_bitmask():
+    """Parse the C-aligned scale bitmask from the piano roll.
+
+    Returns a list of 12 ints where 0 = in scale, 1 = out of scale.
+    Returns None if no scale is set or the helper is unavailable.
+    """
+    try:
+        helper = flp.score.snap_scale_helper
+        if not helper or helper.strip() == '':
+            return None
+        bits = [int(x.strip()) for x in helper.split(',')]
+        if len(bits) != 12:
+            return None
+        if 1 not in bits:
+            return None
+        return bits
+    except Exception:
+        return None
+
+
+def _snap_pitch(pitch, scale_bits, direction):
+    """Snap a MIDI pitch to the nearest diatonic note.
+
+    direction: 1 = nearest, 2 = up, 3 = down
+    """
+    if scale_bits is None or direction == 0:
+        return pitch
+
+    pc = pitch % 12
+    if scale_bits[pc] == 0:
+        return pitch  # Already in scale
+
+    if direction == 2:  # Snap Up
+        p = pitch
+        for _ in range(12):
+            p += 1
+            if p > 127:
+                return pitch
+            if scale_bits[p % 12] == 0:
+                return p
+        return pitch
+
+    if direction == 3:  # Snap Down
+        p = pitch
+        for _ in range(12):
+            p -= 1
+            if p < 0:
+                return pitch
+            if scale_bits[p % 12] == 0:
+                return p
+        return pitch
+
+    # Nearest: check both directions simultaneously
+    for offset in range(1, 7):
+        up_ok = (pitch + offset <= 127 and
+                 scale_bits[(pitch + offset) % 12] == 0)
+        down_ok = (pitch - offset >= 0 and
+                   scale_bits[(pitch - offset) % 12] == 0)
+        if up_ok and down_ok:
+            return pitch - offset  # Tie: prefer down (more consonant)
+        if down_ok:
+            return pitch - offset
+        if up_ok:
+            return pitch + offset
+
+    return pitch
+
+
+# ---------------------------------------------------------------------------
+# Drop voicing algorithms (count from top voice downward)
+# ---------------------------------------------------------------------------
+def _apply_voicing(pitches, voicing_mode, inversion):
+    """Apply voicing transformation to a sorted list of MIDI pitches.
+
+    voicing_mode: 0=close, 1=inversion, 2=drop2, 3=drop3, 4=drop2&4
+    """
+    v = sorted(pitches)
+    n = len(v)
+
+    if voicing_mode == 1:  # Standard inversion (shift bottom N notes up)
+        for inv in range(min(inversion, n - 1)):
+            v[inv] += 12
+        v.sort()
+
+    elif voicing_mode == 2 and n >= 3:  # Drop 2
+        v[n - 2] -= 12
+        v.sort()
+
+    elif voicing_mode == 3 and n >= 4:  # Drop 3
+        v[n - 3] -= 12
+        v.sort()
+
+    elif voicing_mode == 4 and n >= 4:  # Drop 2 & 4
+        v[n - 2] -= 12
+        idx4 = n - 4 if n >= 5 else n - 3
+        v[idx4] -= 12
+        v.sort()
+
+    return v
+
+
+# ---------------------------------------------------------------------------
+# Non-linear strum timing: Δt_n = T_total × (n / (N-1))^γ
+# ---------------------------------------------------------------------------
+def _strum_offset(note_idx, total_notes, strum_ticks, tension):
+    """Calculate the strum time offset for a note in the chord."""
+    if total_notes <= 1 or strum_ticks == 0:
+        return 0
+    t = note_idx / (total_notes - 1)
+    gamma = max(0.1, tension)
+    return int(strum_ticks * (t ** gamma))
+
+
+# ---------------------------------------------------------------------------
+# Clone helper — preserves ALL note properties including FL-specific ones
+# ---------------------------------------------------------------------------
+def _clone_note(src, pitch=None, time=None, length=None, velocity=None):
+    """Create a full copy of a Note with optional overrides."""
+    n = flp.Note()
+    n.number = pitch if pitch is not None else src.number
+    n.time = time if time is not None else src.time
+    n.length = length if length is not None else src.length
+    n.velocity = velocity if velocity is not None else src.velocity
+    n.color = src.color
+    n.pan = src.pan
+    n.fcut = src.fcut
+    n.fres = src.fres
+    n.group = src.group
+    # Preserve extended FL Studio per-note properties
+    try:
+        n.pitchofs = src.pitchofs
+    except Exception:
+        pass
+    try:
+        n.slide = src.slide
+    except Exception:
+        pass
+    try:
+        n.porta = src.porta
+    except Exception:
+        pass
+    try:
+        n.muted = src.muted
+    except Exception:
+        pass
+    return n
+
+
+# ---------------------------------------------------------------------------
+# Control Surface .fst file name (place in same folder as this script)
+# If the file exists and LoadSurface is available (FL 24.1.0+), the script
+# uses the custom GUI. Otherwise it falls back to the standard ScriptDialog.
+# See "Chord Stamper Pro - Control Surface Guide.txt" for build instructions.
+# ---------------------------------------------------------------------------
+_FST_FILE = 'Chord Stamper Pro.fst'
+
+
+def _try_load_surface():
+    """Attempt to load the Control Surface .fst GUI.
+
+    Returns the form if successful, None otherwise.
+    """
+    try:
+        form = flp.LoadSurface(_FST_FILE)
+        if form is not None:
+            return form
+    except Exception:
+        pass
+    return None
+
+
+def _build_standard_dialog():
+    """Build the standard ScriptDialog fallback UI."""
     form = flp.ScriptDialog(
-        'Chord Stamper',
-        'Stamps a chord shape at each selected note position.\r\n'
-        'The original note becomes the chord root.\r\n'
-        'Inversion shifts the lowest N notes up an octave.'
+        'Chord Stamper Pro',
+        'Advanced chord stamping with jazz voicings and humanization.\r\n\r\n'
+        'HARMONY: 35 chord types including 11ths, 13ths, and altered\r\n'
+        'dominants with proper voicing rules (omitted 5ths, #11, etc.).\r\n\r\n'
+        'VOICING: Drop 2/3/2&4 open voicings that count from the top\r\n'
+        'voice down, spreading chords across a wider range.\r\n\r\n'
+        'HUMANIZE: Gaussian velocity spread and non-linear strum timing\r\n'
+        'with tension control for realistic piano/guitar feel.\r\n\r\n'
+        'SCALE SNAP: Uses the piano roll scale highlighting to force\r\n'
+        'all generated notes into the active scale. Set your scale in\r\n'
+        'the piano roll first (Helpers > Scale highlighting).\r\n\r\n'
+        'TIP: For a premium GUI experience, build the Control Surface\r\n'
+        'layout and save it as "Chord Stamper Pro.fst" in the scripts folder.'
     )
+    # --- Harmony ---
     form.AddInputCombo('Chord Type', CHORD_NAMES, 0)
+    # --- Voicing ---
+    form.AddInputCombo('Voicing', VOICING_MODES, 0)
     form.AddInputKnobInt('Inversion', 0, 0, 3)
+    # --- Velocity ---
     form.AddInputKnob('Velocity Scale', 1.0, 0.1, 1.5)
+    form.AddInputKnob('Humanize Spread', 0.0, 0.0, 0.15)
+    # --- Strum ---
+    form.AddInputKnob('Strum Time (16ths)', 0.0, 0.0, 2.0)
+    form.AddInputKnob('Strum Tension', 1.0, 0.2, 4.0)
+    # --- Scale snap ---
+    form.AddInputCombo('Snap to Scale', SNAP_DIRECTIONS, 0)
+    # --- Options ---
     form.AddInputCheckbox('Keep Original Notes', True)
     form.AddInputCheckbox('Selected Notes Only', True)
     return form
 
 
+def createDialog():
+    """Try Control Surface first, fall back to ScriptDialog."""
+    form = _try_load_surface()
+    if form is not None:
+        return form
+    return _build_standard_dialog()
+
+
+# ---------------------------------------------------------------------------
+# Apply — all computation in Python memory, single commit to score
+# ---------------------------------------------------------------------------
 def apply(form):
     chord_idx = int(form.GetInputValue('Chord Type'))
+    voicing_mode = int(form.GetInputValue('Voicing'))
     inversion = int(form.GetInputValue('Inversion'))
     vel_scale = form.GetInputValue('Velocity Scale')
-    keep_original = form.GetInputValue('Keep Original Notes')
-    selected_only = form.GetInputValue('Selected Notes Only')
+    humanize_spread = form.GetInputValue('Humanize Spread')
+    strum_16ths = form.GetInputValue('Strum Time (16ths)')
+    strum_tension = form.GetInputValue('Strum Tension')
+    snap_dir = int(form.GetInputValue('Snap to Scale'))
+    keep_original = bool(form.GetInputValue('Keep Original Notes'))
+    selected_only = bool(form.GetInputValue('Selected Notes Only'))
 
+    ppq = flp.score.PPQ
     intervals = CHORD_INTERVALS[CHORD_NAMES[chord_idx]]
 
-    # Collect source notes
+    # Parse scale bitmask for diatonic snapping
+    scale_bits = _parse_scale_bitmask() if snap_dir > 0 else None
+
+    # Strum duration in ticks
+    strum_ticks = int(strum_16ths * (ppq / 4))
+
+    # Collect source and other notes
     source_notes = []
     other_notes = []
     for i in range(flp.score.noteCount):
@@ -69,53 +358,75 @@ def apply(form):
     if not source_notes:
         return
 
-    # Build new notes
+    # Seed RNG from note data for reproducible results per selection
+    _seed(sum(n.time * 3 + n.number * 7 + n.length for n in source_notes))
+
+    # --- Build all chords in Python memory first, then commit once ---
     new_notes = list(other_notes)
 
     for src in source_notes:
-        # Build chord intervals with inversion
-        chord_intervals = list(intervals)
-        for inv in range(min(inversion, len(chord_intervals) - 1)):
-            chord_intervals[inv] += 12
-        chord_intervals.sort()
+        # 1. Build absolute MIDI pitches from root + intervals
+        raw_pitches = [src.number + iv for iv in intervals]
 
-        for i, interval in enumerate(chord_intervals):
-            if interval == 0 and keep_original:
-                # Keep original note as-is for the root
+        # 2. Apply voicing (drop / inversion)
+        voiced_pitches = _apply_voicing(raw_pitches, voicing_mode, inversion)
+
+        # 3. Scale snap each pitch
+        if scale_bits is not None and snap_dir > 0:
+            voiced_pitches = [_snap_pitch(p, scale_bits, snap_dir)
+                              for p in voiced_pitches]
+
+        # 4. Filter out-of-range pitches
+        voiced_pitches = [p for p in voiced_pitches if 0 <= p <= 127]
+
+        if not voiced_pitches:
+            continue
+
+        total_chord_notes = len(voiced_pitches)
+
+        # 5. Generate notes with humanization
+        root_added = False
+        for note_idx, pitch in enumerate(voiced_pitches):
+            is_root = (pitch == src.number and not root_added)
+
+            # --- Velocity: Gaussian with voice-position weighting ---
+            base_vel = src.velocity * vel_scale
+
+            if humanize_spread > 0 and total_chord_notes > 1:
+                # Outer voices (root & melody) slightly louder
+                if note_idx == 0 or note_idx == total_chord_notes - 1:
+                    mu = base_vel + humanize_spread * 0.3
+                else:
+                    mu = base_vel - humanize_spread * 0.15
+                note_vel = _gauss(mu, humanize_spread)
+            else:
+                note_vel = base_vel
+
+            note_vel = max(0.01, min(1.0, note_vel))
+
+            # --- Strum timing: non-linear offset ---
+            time_offset = _strum_offset(note_idx, total_chord_notes,
+                                        strum_ticks, strum_tension)
+            note_time = max(0, src.time + time_offset)
+
+            # --- Create the note preserving all source properties ---
+            if is_root and keep_original:
                 new_notes.append(src)
-                continue
+                root_added = True
+            else:
+                new_notes.append(_clone_note(
+                    src,
+                    pitch=pitch,
+                    time=note_time,
+                    velocity=note_vel,
+                ))
 
-            pitch = src.number + interval
-            if pitch > 127:
-                continue
+        # If not keeping original, ensure root is still present
+        if not keep_original and not root_added:
+            root_vel = max(0.01, min(1.0, src.velocity * vel_scale))
+            new_notes.append(_clone_note(src, velocity=root_vel))
 
-            note = flp.Note()
-            note.number = pitch
-            note.time = src.time
-            note.length = src.length
-            note.velocity = min(1.0, src.velocity * vel_scale)
-            note.color = src.color
-            note.pan = src.pan
-            note.fcut = src.fcut
-            note.fres = src.fres
-            note.group = src.group
-            new_notes.append(note)
-
-        # Add root if not keeping original
-        if not keep_original:
-            note = flp.Note()
-            note.number = src.number
-            note.time = src.time
-            note.length = src.length
-            note.velocity = src.velocity
-            note.color = src.color
-            note.pan = src.pan
-            note.fcut = src.fcut
-            note.fres = src.fres
-            note.group = src.group
-            new_notes.append(note)
-
-    # Replace score
+    # --- Single commit to score ---
     flp.score.clearNotes(True)
     for note in new_notes:
         flp.score.addNote(note)

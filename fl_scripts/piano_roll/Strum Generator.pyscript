@@ -1,12 +1,18 @@
-"""Strum Generator - Convert chords into strummed patterns.
+"""Strum Generator Pro - Convert chords into strummed patterns.
 
 Offsets note start times within chords to simulate guitar strumming,
-harp arpeggiation, or other staggered-note techniques.
+harp arpeggiation, or other staggered-note techniques. Supports
+tension curves for both timing and velocity, deterministic random
+scatter, and multiple strum directions.
 """
 
 import flpianoroll as flp
+import math
+import os
 
-
+# ---------------------------------------------------------------------------
+# Strum modes
+# ---------------------------------------------------------------------------
 STRUM_MODES = [
     'Down (Low to High)',
     'Up (High to Low)',
@@ -16,33 +22,106 @@ STRUM_MODES = [
     'Fan In (Edges)',
 ]
 
+# ---------------------------------------------------------------------------
+# Deterministic RNG (xorshift32) — preview always matches accept
+# ---------------------------------------------------------------------------
+_rng_state = 1
 
-def createDialog():
+def _seed_rng(s):
+    global _rng_state
+    _rng_state = max(1, s & 0xFFFFFFFF)
+
+def _rand():
+    """Return a float in [0, 1)."""
+    global _rng_state
+    x = _rng_state
+    x ^= (x << 13) & 0xFFFFFFFF
+    x ^= (x >> 17)
+    x ^= (x << 5) & 0xFFFFFFFF
+    _rng_state = x & 0xFFFFFFFF
+    return (_rng_state & 0x7FFFFFFF) / 0x80000000
+
+# ---------------------------------------------------------------------------
+# Control Surface support
+# ---------------------------------------------------------------------------
+_SURFACE_NAME = 'Strum Generator.fst'
+
+def _try_load_surface():
+    try:
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), _SURFACE_NAME
+        )
+        if os.path.isfile(path):
+            form = flp.ScriptDialog('Strum Generator Pro', '')
+            form.LoadSurface(path)
+            return form
+    except Exception:
+        pass
+    return None
+
+def _build_standard_dialog():
     form = flp.ScriptDialog(
-        'Strum Generator',
+        'Strum Generator Pro',
         'Offsets note start times within chords to create strumming effects.\r\n'
         'Notes at the same time position are treated as a chord.\r\n'
-        'Strum Time is the total spread in 16th notes.'
+        'Strum Time is the total spread in 16th notes.\r\n'
+        'Time/Vel Tension curves the offset distribution (0 = linear).'
     )
     form.AddInputCombo('Strum Mode', STRUM_MODES, 0)
     form.AddInputKnob('Strum Time', 0.25, 0.01, 2.0)
-    form.AddInputKnob('Velocity Fade', 0.0, -0.3, 0.3)
+    form.AddInputKnob('Time Tension', 0.0, -1.0, 1.0)
+    form.AddInputKnob('Velocity Fade', 0.0, -0.5, 0.5)
+    form.AddInputKnob('Vel Tension', 0.0, -1.0, 1.0)
+    form.AddInputKnobInt('Seed', 0, 0, 9999)
     form.AddInputCheckbox('Shorten Notes', True)
     form.AddInputCheckbox('Selected Notes Only', True)
     return form
 
+def createDialog():
+    form = _try_load_surface()
+    if form is not None:
+        return form
+    return _build_standard_dialog()
 
+# ---------------------------------------------------------------------------
+# Tension curve helper
+# ---------------------------------------------------------------------------
+def _apply_tension(t, tension):
+    """Apply nonlinear tension to a [0,1] parameter.
+    tension=0 → linear, positive → accelerate (cluster early),
+    negative → decelerate (cluster late).
+    Maps tension [-1,1] to exponent [0.5, 2.0] via 2**tension.
+    """
+    if tension == 0.0 or t <= 0.0 or t >= 1.0:
+        return t
+    exponent = math.pow(2.0, tension)
+    return math.pow(t, exponent)
+
+# ---------------------------------------------------------------------------
+# Main apply
+# ---------------------------------------------------------------------------
 def apply(form):
     strum_mode = int(form.GetInputValue('Strum Mode'))
     strum_time = form.GetInputValue('Strum Time')
+    time_tension = form.GetInputValue('Time Tension')
     vel_fade = form.GetInputValue('Velocity Fade')
-    shorten = form.GetInputValue('Shorten Notes')
-    selected_only = form.GetInputValue('Selected Notes Only')
+    vel_tension = form.GetInputValue('Vel Tension')
+    seed = int(form.GetInputValue('Seed'))
+    shorten = int(form.GetInputValue('Shorten Notes'))
+    selected_only = int(form.GetInputValue('Selected Notes Only'))
 
-    # Strum time in ticks (input is in 16th note units)
-    strum_ticks = int(strum_time * flp.score.PPQ * 0.25)
+    # Strum time in ticks (input is in 16th-note units)
+    strum_ticks = int(round(strum_time * flp.score.PPQ * 0.25))
+    if strum_ticks < 1:
+        return
 
-    # Group notes by start time (chord groups)
+    # Minimum note length floor: 5% of a quarter note
+    min_length = max(1, int(flp.score.PPQ * 0.05))
+
+    # Seed the RNG (combine user seed with a salt)
+    _seed_rng(seed * 2654435761 + 12345)
+
+    # Collect eligible notes (in-place references)
     notes = []
     for i in range(flp.score.noteCount):
         note = flp.score.getNote(i)
@@ -53,14 +132,19 @@ def apply(form):
     if not notes:
         return
 
-    # Group notes that start at the same time (within small tolerance)
-    tolerance = flp.score.PPQ // 32  # ~1/128th note tolerance
+    # -----------------------------------------------------------------------
+    # Sliding-window chord grouping
+    # Each note is grouped with the previous if within tolerance of the
+    # previous note (not just the first), preventing splits when chords
+    # drift slightly.
+    # -----------------------------------------------------------------------
+    tolerance = flp.score.PPQ // 32  # ~1/128th note
     notes.sort(key=lambda n: n.time)
 
     chord_groups = []
     current_group = [notes[0]]
     for n in notes[1:]:
-        if abs(n.time - current_group[0].time) <= tolerance:
+        if abs(n.time - current_group[-1].time) <= tolerance:
             current_group.append(n)
         else:
             if len(current_group) > 1:
@@ -69,49 +153,70 @@ def apply(form):
     if len(current_group) > 1:
         chord_groups.append(current_group)
 
+    if not chord_groups:
+        return
+
+    # -----------------------------------------------------------------------
     # Apply strum to each chord group
+    # -----------------------------------------------------------------------
     alt_down = True
-    import time as _time
-    rng_state = _time.time_ns()
 
     for group in chord_groups:
-        # Sort by pitch
+        # Sort by pitch (low to high)
         group.sort(key=lambda n: n.number)
         count = len(group)
         if count < 2:
             continue
 
-        for i, note in enumerate(group):
-            if strum_mode == 0:      # Down
-                t = i / (count - 1) if count > 1 else 0
-            elif strum_mode == 1:    # Up
-                t = (count - 1 - i) / (count - 1) if count > 1 else 0
-            elif strum_mode == 2:    # Alternating
-                if alt_down:
-                    t = i / (count - 1) if count > 1 else 0
-                else:
-                    t = (count - 1 - i) / (count - 1) if count > 1 else 0
-            elif strum_mode == 3:    # Random
-                rng_state = (rng_state * 1103515245 + 12345) & 0x7FFFFFFF
-                t = (rng_state / 0x7FFFFFFF)
-            elif strum_mode == 4:    # Fan Out (center first)
-                mid = (count - 1) / 2
-                t = abs(i - mid) / mid if mid > 0 else 0
-            elif strum_mode == 5:    # Fan In (edges first)
-                mid = (count - 1) / 2
-                t = 1.0 - (abs(i - mid) / mid if mid > 0 else 0)
-            else:
-                t = i / (count - 1) if count > 1 else 0
+        divisor = count - 1  # always >= 1 since count >= 2
 
-            offset = int(t * strum_ticks)
+        for idx, note in enumerate(group):
+            # --- Compute base t in [0, 1] ---
+            if strum_mode == 0:        # Down (low → high)
+                t = idx / divisor
+            elif strum_mode == 1:      # Up (high → low)
+                t = (divisor - idx) / divisor
+            elif strum_mode == 2:      # Down-Up alternating
+                if alt_down:
+                    t = idx / divisor
+                else:
+                    t = (divisor - idx) / divisor
+            elif strum_mode == 3:      # Random scatter
+                t = _rand()
+            elif strum_mode == 4:      # Fan Out (center first)
+                mid = divisor / 2.0
+                if mid > 0:
+                    t = abs(idx - mid) / mid
+                else:
+                    t = 0.0
+            elif strum_mode == 5:      # Fan In (edges first)
+                mid = divisor / 2.0
+                if mid > 0:
+                    t = 1.0 - abs(idx - mid) / mid
+                else:
+                    t = 0.0
+            else:
+                t = idx / divisor
+
+            # Clamp t to [0, 1]
+            t = max(0.0, min(1.0, t))
+
+            # Apply time tension curve
+            t_curved = _apply_tension(t, time_tension)
+
+            # Compute tick offset
+            offset = int(round(t_curved * strum_ticks))
+
+            # Shift note time forward
             note.time = note.time + offset
 
-            # Shorten note to maintain original end time
+            # Shorten note to preserve original end time
             if shorten and offset > 0:
-                note.length = max(1, note.length - offset)
+                note.length = max(min_length, note.length - offset)
 
-            # Apply velocity fade
-            vel_change = vel_fade * t
+            # Velocity fade with tension
+            vel_t = _apply_tension(t, vel_tension)
+            vel_change = vel_fade * vel_t
             note.velocity = max(0.0, min(1.0, note.velocity + vel_change))
 
         alt_down = not alt_down

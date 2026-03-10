@@ -1,0 +1,357 @@
+===========================================================================
+  RHYTHM GENERATOR PRO — Control Surface (.fst) Build Guide
+===========================================================================
+
+  This guide tells you exactly how to build the custom GUI in FL Studio's
+  Control Surface plugin. When done, the script auto-detects and uses it.
+  If the .fst file is missing, the script falls back to the standard dialog.
+
+  REQUIREMENTS: FL Studio 24.1.0 or later (LoadSurface API)
+
+===========================================================================
+  STEP 1: CREATE THE CONTROL SURFACE PRESET
+===========================================================================
+
+  1. Open FL Studio
+  2. Add a new "Control Surface" plugin instance (Add > More Plugins)
+  3. Right-click the Control Surface title bar > choose a dark background
+  4. Build the layout described below using drag-and-drop controls
+  5. When done: Presets menu > "Save preset as..." >
+     Save as: "Rhythm Generator.fst"
+  6. Copy the .fst file to your piano roll scripts folder:
+     Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  The script looks for a file named exactly: "Rhythm Generator.fst"
+
+===========================================================================
+  STEP 2: LAYOUT — FOUR ZONES
+===========================================================================
+
+  +------------------+------------------+------------------+------------------+
+  |  ZONE 1: MODE    |  ZONE 2: LAYERS  |  ZONE 3: DYNAMICS|  ZONE 4: OPTIONS |
+  |  & PATTERN       |  & NOTE          |  & GROOVE        |  & STRUCTURE     |
+  +------------------+------------------+------------------+------------------+
+
+---------------------------------------------------------------------------
+  ZONE 1: MODE & PATTERN (left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)         | Range / Options        | Default
+  ------------------|----------------------|------------------------|--------
+  Knob (integer)  | Mode                 | 0-5 (6 rhythm modes)   | 0
+  Knob (integer) | Pattern Length       | 2 to 64               | 16
+  Knob (integer) | Onsets               | 1 to 32               | 5
+  Knob (integer) | Rotation             | 0 to 32               | 0
+
+  MODE VALUES:
+    0 = Euclidean (Bjorklund) — culturally accurate Euclidean rhythms
+    1 = Polyrhythm (true N:M) — two layers with independent step sizes
+    2 = Polymeter (2 layers) — two Euclidean patterns merged on same grid
+    3 = Syncopated (LHL metrical) — intelligent groove via metrical weights
+    4 = Density Gradient — probability-based generation with curve shaping
+    5 = Dotted — notes spaced at dotted intervals (3 sixteenths)
+
+  PATTERN LENGTH:
+  - Total number of pulses (16th notes) in the pattern
+  - 16 = one 4/4 bar, 32 = two bars, 12 = one 3/4 bar
+
+  ONSETS:
+  - Number of note events to distribute
+  - For Euclidean: distributes evenly via Bjorklund algorithm
+  - For Polyrhythm: Layer 1 beat count
+  - For Dotted: maximum number of dotted notes
+
+  ROTATION:
+  - Rotates the Euclidean pattern by N positions
+  - Useful for shifting the downbeat to create different grooves
+  - E(3,8) with rotation 0 = Tresillo, rotation 1 = shifted variant
+
+---------------------------------------------------------------------------
+  ZONE 2: LAYERS & NOTE (center-left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)         | Range / Options        | Default
+  ------------------|----------------------|------------------------|--------
+  Knob (integer) | Layer 2 Beats        | 1 to 16               | 3
+  Knob (integer) | Layer 1 Color        | 0 to 15               | 0
+  Knob (integer) | Layer 2 Color        | 0 to 15               | 1
+  Knob (integer) | Note Number          | 0 to 131              | 60
+  Knob       | Velocity             | 0.10 to 1.00          | 0.80
+  Knob       | Note Length          | 0.10 to 4.00          | 1.00
+
+  LAYER 2 BEATS:
+  - For Polyrhythm mode: number of evenly-spaced beats in Layer 2
+    (e.g., Onsets=4, Layer 2 Beats=3 creates a 4-against-3 polyrhythm)
+  - For Polymeter mode: number of onsets for second Euclidean layer
+
+  LAYER COLORS:
+  - FL Studio note colors map to MIDI channels 1-16
+  - Use different colors to route layers to separate instruments
+  - E.g., Layer 1 Color=0 (kick), Layer 2 Color=1 (hi-hat)
+  - In Polymeter: Layer 2 notes appear only where Layer 1 doesn't hit
+
+  NOTE NUMBER:
+  - MIDI pitch for generated notes (0-131, FL Studio extended range)
+  - C5 (middle C) = 60
+
+  NOTE LENGTH:
+  - Multiplier of one 16th note
+  - 1.0 = exactly one 16th note
+  - 0.5 = very short staccato
+  - 4.0 = full quarter note length
+
+---------------------------------------------------------------------------
+  ZONE 3: DYNAMICS & GROOVE (center-right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)            | Range          | Default
+  ------------------|-------------------------|----------------|--------
+  Knob       | Accent Strength         | 0.00 to 1.00  | 0.30
+  Knob       | Humanize                | 0.00 to 1.00  | 0.10
+  Knob       | Syncopation Intensity   | 0.00 to 1.00  | 0.50
+  Knob (integer)  | Density Curve           | 0-4 (5 curves) | 0
+  Knob       | Density                 | 0.00 to 1.00  | 0.60
+
+  ACCENT STRENGTH:
+  - Controls velocity variation based on metrical position
+  - 0.0 = flat velocity (all notes same loudness)
+  - 1.0 = strong accents on downbeats, softer on weak positions
+  - Uses Longuet-Higgins & Lee metrical weight hierarchy
+  - Adapts to the project's time signature (4/4, 3/4, 6/8, etc.)
+
+  HUMANIZE:
+  - Gaussian micro-velocity variation (Box-Muller transform)
+  - 0.0 = perfectly uniform velocity
+  - Higher values = more organic velocity fluctuation
+  - Bell-curve distribution: most notes near target, rare outliers
+
+  SYNCOPATION INTENSITY:
+  - Only affects Syncopated mode
+  - 0.0 = no syncopation (straight Euclidean pattern)
+  - 1.0 = maximum displacement of strong-beat notes to weak beats
+  - Based on LHL metrical weights: only shifts notes from metrically
+    strong positions to adjacent weaker positions
+  - Produces genuine musical groove, not random displacement
+
+  DENSITY CURVE VALUES:
+    0 = Sine (swell in middle of pattern)
+    1 = Linear Rise (sparse start, dense end)
+    2 = Linear Fall (dense start, sparse end)
+    3 = Gaussian (bell curve — dense center, sparse edges)
+    4 = Uniform (equal probability throughout)
+
+  DENSITY:
+  - Base probability for Density Gradient mode (0.0-1.0)
+  - Combined with the Density Curve shape
+  - 0.0 = no notes, 1.0 = maximum density
+  - Uses deterministic seeded random for reproducible results
+
+---------------------------------------------------------------------------
+  ZONE 4: OPTIONS & STRUCTURE (right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)            | Range          | Default
+  ------------------|-------------------------|----------------|--------
+  Knob (integer) | Repeats                 | 1 to 8        | 1
+  Knob (integer) | Seed                    | 0 to 9999     | 0
+  CheckBox     | Use Timeline Selection  | 0 or 1         | 1 (on)
+
+  REPEATS:
+  - Number of times to repeat the pattern consecutively
+  - 1 = single pattern, 4 = four repetitions back-to-back
+
+  SEED:
+  - Controls deterministic random seed for density, humanize, syncopation
+  - Same seed = same output every time (preview matches accept)
+  - Change seed to get a different random variation
+
+  USE TIMELINE SELECTION:
+  - When ON: bounds generation within the highlighted piano roll region
+  - When OFF: generates from the start of the score (tick 0)
+  - Prevents accidentally overwriting existing notes elsewhere
+
+===========================================================================
+  STEP 3: CONTROL NAMING — CRITICAL
+===========================================================================
+
+  Control names MUST match EXACTLY (case-sensitive, including spaces):
+
+    "Mode"
+    "Pattern Length"
+    "Onsets"
+    "Rotation"
+    "Layer 2 Beats"
+    "Layer 1 Color"
+    "Layer 2 Color"
+    "Note Number"
+    "Velocity"
+    "Note Length"
+    "Accent Strength"
+    "Humanize"
+    "Syncopation Intensity"
+    "Density Curve"
+    "Density"
+    "Repeats"
+    "Seed"
+    "Use Timeline Selection"
+
+===========================================================================
+  STEP 4: VISUAL DESIGN SUGGESTIONS
+===========================================================================
+
+  BACKGROUND:  Dark gray or black (#1a1a1a)
+  LABELS:       "MODE"    "LAYERS"    "DYNAMICS"    "OPTIONS"
+  TOTAL SIZE:   ~700 x 350 pixels
+
+  COLOR CODING (optional):
+  - Mode/Pattern:         Blue accent
+  - Layers/Note:          Purple accent
+  - Dynamics/Groove:      Orange/amber accent
+  - Options/Structure:    Green accent
+
+===========================================================================
+  STEP 5: UNDERSTANDING THE MODES
+===========================================================================
+
+  EUCLIDEAN (BJORKLUND):
+  - Uses Bjorklund's algorithm (the definitive Euclidean rhythm algorithm)
+  - Distributes N onsets across M pulses as evenly as possible
+  - Produces culturally accurate phase alignment:
+    E(3,8) = Tresillo/Cuban rhythm [10010010]
+    E(5,8) = Cinquillo [10110110]
+    E(7,16) = Samba necklace
+  - Rotation shifts the downbeat for groove variations
+
+  POLYRHYTHM (TRUE N:M):
+  - Fits two different beat counts into the SAME time span
+  - Layer 1: 'Onsets' evenly spaced beats across the measure
+  - Layer 2: 'Layer 2 Beats' evenly spaced beats (different step size)
+  - Example: Onsets=4, Layer 2 Beats=3 → 4-against-3 polyrhythm
+  - Notes from different layers only coincide at the downbeat
+  - Uses float accumulator with late rounding to prevent tick drift
+  - Layer colors route to separate MIDI channels
+
+  POLYMETER (2 LAYERS):
+  - Two Euclidean patterns on the SAME 16th-note grid
+  - Both patterns have the same total length (Pattern Length)
+  - Layer 1: E(Onsets, Pattern Length)
+  - Layer 2: E(Layer 2 Beats, Pattern Length)
+  - Where both hit simultaneously, only Layer 1 sounds (no stacking)
+  - Layer 2 fills in gaps with its own rhythm
+
+  SYNCOPATED (LHL METRICAL):
+  - Starts with a Euclidean pattern, then intelligently displaces notes
+  - Uses Longuet-Higgins & Lee metrical weight hierarchy
+  - Notes on metrically STRONG positions get shifted to adjacent
+    WEAKER positions (e.g., downbeat → preceding 16th note)
+  - Syncopation Intensity controls the probability of displacement
+  - Intensity=0 = straight Euclidean, Intensity=1 = maximum syncopation
+  - Adapts to the project's time signature
+
+  DENSITY GRADIENT:
+  - Probability-based generation — each step gets a note based on
+    the Density value multiplied by the Curve shape at that position
+  - Sine: swell in the middle (quiet edges, busy center)
+  - Linear Rise: builds from sparse to dense
+  - Linear Fall: starts dense, tapers off
+  - Gaussian: bell curve — dense center, sparse edges
+  - Uniform: equal probability at every position
+  - Uses deterministic seeded random for reproducibility
+
+  DOTTED:
+  - Places notes at dotted intervals (every 3 sixteenth notes)
+  - Creates the characteristic "dotted eighth note" feel
+  - Onsets controls how many dotted notes to place
+
+===========================================================================
+  STEP 6: TESTING
+===========================================================================
+
+  BJORKLUND TEST:
+  - Set Mode = Euclidean, Pattern Length = 8, Onsets = 5, Rotation = 0
+  - Run: should produce the Cinquillo pattern [10110110]
+  - 5 notes at positions 0, 2, 3, 5, 6 of the 8-step grid
+  - No manual rotation needed for correct phase
+
+  POLYRHYTHM TEST:
+  - Set Mode = Polyrhythm, Onsets = 4, Layer 2 Beats = 3
+  - Pattern Length = 16 (one bar)
+  - Run: Layer 1 should place 4 evenly spaced notes (every 4 sixteenths)
+  - Layer 2 should place 3 notes at positions 0, ~5.3, ~10.7 (rounded)
+  - Notes from different layers should have different colors
+  - Only the downbeat (position 0) should have notes from both layers
+
+  POLYMETER TEST:
+  - Set Mode = Polymeter, Pattern Length = 8
+  - Onsets = 3, Layer 2 Beats = 5
+  - Run: E(3,8) and E(5,8) merged on same grid
+  - Layer 2 notes only appear where Layer 1 doesn't already hit
+
+  SYNCOPATION TEST:
+  - Set Mode = Syncopated, Pattern Length = 16, Onsets = 8
+  - Syncopation Intensity = 0: should match straight Euclidean
+  - Increase Intensity to 1.0: strong-beat notes shift to weak beats
+  - Notes should NOT shift to positions that are already occupied
+
+  TIMELINE SELECTION TEST:
+  - Select bars 5-8 in the piano roll
+  - Set Use Timeline Selection = ON
+  - Run: notes should appear ONLY within bars 5-8
+  - No notes at tick 0 or outside the selection
+
+  VELOCITY ACCENT TEST:
+  - Set Mode = Euclidean, Pattern Length = 16, Onsets = 16
+  - Accent Strength = 1.0
+  - Run: beat 1 (downbeat) should have highest velocity
+  - Beat 3 should be second loudest
+  - Offbeat 16th notes should have lowest velocity
+
+  MIDI ROUTING TEST:
+  - Set Mode = Polyrhythm
+  - Layer 1 Color = 0, Layer 2 Color = 3
+  - Run: Layer 1 notes should have color 0, Layer 2 notes color 3
+  - In FL Studio, these route to MIDI channels 1 and 4
+
+  SEED STABILITY TEST:
+  - Set Seed = 42, run Density Gradient mode
+  - Note the resulting pattern
+  - Change Density, change back to same value
+  - Pattern must be identical
+  - Accept — result must match preview
+
+===========================================================================
+  TROUBLESHOOTING
+===========================================================================
+
+  "Euclidean pattern doesn't match known rhythm"
+  - Try different Rotation values
+  - Bjorklund produces the canonical phase, but musical contexts
+    may require shifting the pattern by 1-2 positions
+  - E(3,8) at rotation 0 = standard Tresillo
+
+  "Polyrhythm sounds like polymeter"
+  - Make sure Mode = "Polyrhythm (true N:M)", not "Polymeter"
+  - Polyrhythm uses different step sizes per layer
+  - Check that Layer 2 notes appear at non-grid positions
+
+  "Syncopation sounds random / chaotic"
+  - Lower the Syncopation Intensity to 0.3-0.5
+  - High intensity values shift many notes, which can sound chaotic
+  - The algorithm only shifts to adjacent weaker positions, so
+    moderate values produce the most musical results
+
+  "Density mode produces too few / too many notes"
+  - Adjust the Density knob (base probability)
+  - Try different Density Curve shapes
+  - Uniform gives consistent density; Sine/Gaussian concentrate notes
+
+  "Notes are overwriting my existing composition"
+  - Turn ON "Use Timeline Selection"
+  - Highlight the target region before running the script
+  - This bounds generation to the selected area only
+
+  "All notes have the same velocity"
+  - Increase Accent Strength above 0
+  - Also try increasing Humanize for subtle variation
+
+===========================================================================

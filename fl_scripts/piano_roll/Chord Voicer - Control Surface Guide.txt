@@ -1,0 +1,208 @@
+===========================================================================
+  CHORD VOICER PRO — Control Surface (.fst) Build Guide
+===========================================================================
+
+  This guide tells you exactly how to build the custom GUI in FL Studio's
+  Control Surface plugin. When done, the script auto-detects and uses it.
+  If the .fst file is missing, the script falls back to the standard dialog.
+
+  REQUIREMENTS: FL Studio 24.1.0 or later (LoadSurface API)
+
+===========================================================================
+  STEP 1: CREATE THE CONTROL SURFACE PRESET
+===========================================================================
+
+  1. Open FL Studio
+  2. Add a new "Control Surface" plugin instance (Add > More Plugins)
+  3. Right-click the Control Surface title bar > choose a dark background
+  4. Build the layout described below using drag-and-drop controls
+  5. When done: Presets menu > "Save preset as..." >
+     Save as: "Chord Voicer.fst"
+  6. Copy the .fst file to your piano roll scripts folder:
+     Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  The script looks for a file named exactly: "Chord Voicer.fst"
+
+===========================================================================
+  STEP 2: LAYOUT — TWO ZONES
+===========================================================================
+
+  +---------------------------+---------------------------+
+  |  ZONE 1: VOICING          |  ZONE 2: OPTIONS          |
+  |  & SPREAD                 |  & VOICE LEADING          |
+  +---------------------------+---------------------------+
+
+---------------------------------------------------------------------------
+  ZONE 1: VOICING & SPREAD (left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)        | Range / Options        | Default
+  ------------------|---------------------|------------------------|--------
+  Knob (integer)  | Voicing             | 0-6 (7 voicing modes)  | 0
+  Knob (integer)  | Range               | 0-4 (5 range modes)    | 0
+  Knob| Spread Amount       | 0.00 to 1.00           | 0.75
+
+  VOICING VALUES:
+    0 = Drop 2
+    1 = Drop 3
+    2 = Drop 2+4
+    3 = Open (spread)
+    4 = Close (compact)
+    5 = Root + Shell (3rd & 7th)
+    6 = Quartal (chord-tone)
+
+  RANGE VALUES:
+    0 = Keep Original Range
+    1 = Piano Range (C3-C6)
+    2 = Bass Range (C1-C3)
+    3 = Guitar Range (E2-E5)
+    4 = Wide Spread (C2-C6)
+
+  SPREAD AMOUNT:
+  - Only affects "Open (spread)" voicing mode
+  - Controls how far apart adjacent voices are placed
+  - 0.0 = minimal spread (~6 semitones between voices)
+  - 1.0 = wide spread (~20 semitones between voices)
+
+---------------------------------------------------------------------------
+  ZONE 2: OPTIONS & VOICE LEADING (right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)           | Range          | Default
+  ------------------|------------------------|----------------|--------
+  CheckBox     | Voice Lead (smooth)    | 0 or 1         | 0 (off)
+  CheckBox     | Preserve Bass Note     | 0 or 1         | 1 (on)
+  CheckBox     | Selected Notes Only    | 0 or 1         | 1 (on)
+
+  VOICE LEAD (SMOOTH):
+  - This is an OVERLAY that works with ANY voicing mode
+  - When ON: after applying the chosen voicing, the script then
+    minimizes pitch movement from the previous chord
+  - Each voice is matched by index (voice 1 -> voice 1, etc.)
+  - The first chord plays as-is; subsequent chords are voice-led
+  - Critical: voice identity is preserved (no sorting)
+
+  PRESERVE BASS NOTE:
+  - When ON: the lowest note in each chord stays at its original pitch
+  - Affects Open spread, Voice Lead, and Range fitting
+  - Recommended ON for most arrangements
+
+===========================================================================
+  STEP 3: CONTROL NAMING — CRITICAL
+===========================================================================
+
+  Control names MUST match EXACTLY (case-sensitive, including spaces):
+
+    "Voicing"
+    "Range"
+    "Spread Amount"
+    "Voice Lead (smooth)"
+    "Preserve Bass Note"
+    "Selected Notes Only"
+
+===========================================================================
+  STEP 4: VISUAL DESIGN SUGGESTIONS
+===========================================================================
+
+  BACKGROUND:  Dark gray or black (#1a1a1a)
+  LABELS:       "VOICING"    "OPTIONS"
+  TOTAL SIZE:   ~450 x 250 pixels
+
+  COLOR CODING (optional):
+  - Voicing controls:    Blue accent
+  - Options/toggles:     Green accent
+
+===========================================================================
+  STEP 5: UNDERSTANDING THE VOICING MODES
+===========================================================================
+
+  DROP 2 / DROP 3 / DROP 2+4:
+  - The chord is first normalized to CLOSE POSITION (all notes within
+    one octave above the bass). Then the specified voice(s) counted
+    from the top are dropped down one octave.
+  - Example: C E G B (close) -> Drop 2 -> C B, E G (B dropped)
+  - Requires at least 3 notes (Drop 2) or 4 notes (Drop 3, Drop 2+4)
+
+  OPEN (SPREAD):
+  - Redistributes chord tones across wider octave spacing
+  - PRESERVES pitch classes — only changes which octave each note is in
+  - Never invents new pitches or alters the harmony
+  - Use Spread Amount to control the width
+
+  CLOSE (COMPACT):
+  - Stacks all notes within one octave above the bass
+  - Standard close-position voicing used in theory textbooks
+
+  ROOT + SHELL:
+  - Uses template-scoring to detect the true root (not just the bass)
+  - Tests all pitch classes against known chord templates (maj7, min7,
+    dom7, dim7, m7b5, etc.) and picks the best match
+  - Keeps only root + 3rd + 7th (the essential "shell" for jazz comping)
+
+  QUARTAL (CHORD-TONE):
+  - Reorders existing chord tones to approximate 4th intervals
+  - Does NOT discard chord tones or build pure P4 stacks
+  - Tries every pitch class as starting note and picks the ordering
+    with smallest deviation from perfect 4ths
+
+===========================================================================
+  STEP 6: TESTING
+===========================================================================
+
+  DROP VOICING TEST:
+  - Enter C4 E4 G4 B4 (Cmaj7 close position)
+  - Run Drop 2: should get C4 E4 B3 G4 (sorted: B3 C4 E4 G4)
+  - The second-highest voice (E originally at position 3) drops
+
+  OPEN SPREAD TEST:
+  - Enter C4 E4 G4 B4
+  - Run Open with Spread = 0.5
+  - All four pitch classes (C, E, G, B) must be present in output
+  - Notes should be spread across multiple octaves
+
+  SHELL VOICING TEST:
+  - Enter E3 G3 B3 D4 (Em7, root = E not the bass in an inversion)
+  - The template scorer should detect E as root
+  - Output should keep E (root), G (minor 3rd), D (minor 7th)
+
+  QUARTAL TEST:
+  - Enter C4 E4 G4 B4
+  - Output should reorder to approximate 4th intervals
+  - All four pitch classes must still be present
+
+  VOICE LEADING TEST:
+  - Enter two chords: Cmaj7 at beat 1, Dm7 at beat 2
+  - Run any voicing with Voice Lead ON
+  - The Dm7 voices should move minimally from the Cmaj7 positions
+  - No voices should jump unnecessarily
+
+  NON-DESTRUCTIVE TEST:
+  - Have some unselected notes in the piano roll
+  - Run with "Selected Notes Only" ON
+  - Unselected notes must remain completely untouched
+
+===========================================================================
+  TROUBLESHOOTING
+===========================================================================
+
+  "Drop voicing sounds wrong / too close"
+  - The script normalizes to close position FIRST, then drops
+  - If input is already spread out, the close normalization changes it
+  - This is correct behavior — drop voicings are defined from close
+
+  "Shell voicing keeps too many / wrong notes"
+  - Template scoring picks the best-matching chord type
+  - If the chord doesn't match any template well, it falls back to
+    keeping root + next note
+  - Works best with standard jazz chord voicings (maj7, min7, dom7)
+
+  "Voice leading isn't working"
+  - Voice leading only affects the 2nd chord onward (1st chord has
+    no reference to lead from)
+  - Make sure the checkbox is ON (not a voicing mode — it's an overlay)
+
+  "Notes disappeared"
+  - Check if Range mode is constraining notes outside the chord's range
+  - Try "Keep Original Range" first to isolate the issue
+
+===========================================================================

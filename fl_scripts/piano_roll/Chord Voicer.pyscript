@@ -1,0 +1,610 @@
+"""Chord Voicer Pro - Transform block chords into professional voicings.
+
+Takes stacked block chords and rearranges them into open voicings,
+drop-2, drop-3, spread, and other arrangements used by professional
+arrangers and jazz pianists. Voice leading optimization can be applied
+as an overlay on any voicing mode for smooth chord transitions.
+
+Enhanced from audit recommendations with pitch-class-preserving
+algorithms, template-scoring root detection, and non-destructive
+score commits.
+"""
+
+import flpianoroll as flp
+import math
+
+# ---------------------------------------------------------------------------
+# Mode and option definitions
+# ---------------------------------------------------------------------------
+VOICING_MODES = [
+    'Drop 2',
+    'Drop 3',
+    'Drop 2+4',
+    'Open (spread)',
+    'Close (compact)',
+    'Root + Shell (3rd & 7th)',
+    'Quartal (chord-tone)',
+]
+
+RANGE_MODES = [
+    'Keep Original Range',
+    'Piano Range (C3-C6)',
+    'Bass Range (C1-C3)',
+    'Guitar Range (E2-E5)',
+    'Wide Spread (C2-C6)',
+]
+
+# Range bounds (FL Studio MIDI note domain: 0-131)
+RANGE_BOUNDS = {
+    0: (0, 131),       # Keep original
+    1: (48, 84),       # Piano
+    2: (24, 48),       # Bass
+    3: (40, 76),       # Guitar
+    4: (36, 96),       # Wide
+}
+
+
+# ---------------------------------------------------------------------------
+# Control Surface .fst support
+# ---------------------------------------------------------------------------
+_FST_FILE = 'Chord Voicer.fst'
+
+
+def _try_load_surface():
+    """Attempt to load the Control Surface .fst GUI."""
+    try:
+        form = flp.LoadSurface(_FST_FILE)
+        if form is not None:
+            return form
+    except Exception:
+        pass
+    return None
+
+
+def _build_standard_dialog():
+    """Build the standard ScriptDialog fallback UI."""
+    form = flp.ScriptDialog(
+        'Chord Voicer Pro',
+        'Transforms block chords into professional voicings.\r\n\r\n'
+        'Select notes that form chords (notes at the same time position).\r\n'
+        'The script detects chord groups and rearranges note positions.\r\n\r\n'
+        'Drop 2: Second-highest voice dropped an octave (jazz standard).\r\n'
+        'Drop 3: Third-highest voice dropped an octave.\r\n'
+        'Drop 2+4: Voices 2 and 4 dropped (big band spread).\r\n'
+        'Open: Chord tones spread across octaves (preserves pitch classes).\r\n'
+        'Close: Compact within one octave above bass.\r\n'
+        'Shell: Root + 3rd + 7th only (jazz comping essentials).\r\n'
+        'Quartal: Reorders chord tones to approximate 4th intervals.\r\n\r\n'
+        'Voice Lead: Overlay checkbox — applies smooth voice leading\r\n'
+        'AFTER any voicing mode. Minimizes pitch movement between chords.'
+    )
+    # --- Voicing ---
+    form.AddInputCombo('Voicing', VOICING_MODES, 0)
+    form.AddInputCombo('Range', RANGE_MODES, 0)
+    form.AddInputKnob('Spread Amount', 0.75, 0.0, 1.0)
+    # --- Voice Leading ---
+    form.AddInputCheckbox('Voice Lead (smooth)', False)
+    # --- Options ---
+    form.AddInputCheckbox('Preserve Bass Note', True)
+    form.AddInputCheckbox('Selected Notes Only', True)
+    return form
+
+
+def createDialog():
+    """Try Control Surface first, fall back to ScriptDialog."""
+    form = _try_load_surface()
+    if form is not None:
+        return form
+    return _build_standard_dialog()
+
+
+# ---------------------------------------------------------------------------
+# Clone helper — preserves ALL note properties including FL-specific ones
+# ---------------------------------------------------------------------------
+def _clone_note(src, pitch=None):
+    """Create a full copy of a Note with optional pitch override."""
+    n = flp.Note()
+    n.number = pitch if pitch is not None else src.number
+    n.time = src.time
+    n.length = src.length
+    n.velocity = src.velocity
+    n.color = src.color
+    n.pan = src.pan
+    n.fcut = src.fcut
+    n.fres = src.fres
+    n.group = src.group
+    try:
+        n.pitchofs = src.pitchofs
+    except Exception:
+        pass
+    try:
+        n.slide = src.slide
+    except Exception:
+        pass
+    try:
+        n.porta = src.porta
+    except Exception:
+        pass
+    try:
+        n.muted = src.muted
+    except Exception:
+        pass
+    try:
+        n.release = src.release
+    except Exception:
+        pass
+    try:
+        n.repeats = src.repeats
+    except Exception:
+        pass
+    return n
+
+
+# ---------------------------------------------------------------------------
+# Close-position normalization
+# ---------------------------------------------------------------------------
+def _close_position(pitches):
+    """Stack pitch classes tightly above the bass note.
+
+    Returns a new list of pitches in close voicing (all within one octave
+    above the bass). This is the required baseline for drop voicings.
+    """
+    if len(pitches) < 2:
+        return list(pitches)
+
+    bass = pitches[0]
+    pcs = [(p % 12) for p in pitches[1:]]
+    result = [bass]
+
+    for pc in pcs:
+        note_val = (bass // 12) * 12 + pc
+        # Place just above the last note in the stack
+        while note_val <= result[-1]:
+            note_val += 12
+        # Keep within one octave of bass
+        while note_val > bass + 12:
+            note_val -= 12
+        if note_val <= bass:
+            note_val += 12
+        result.append(note_val)
+
+    result.sort()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Drop voicings from close position
+# ---------------------------------------------------------------------------
+def _drop_from_close(close_pitches, drop_indices):
+    """Apply drop voicing: drop specified voices (from top) down an octave.
+
+    drop_indices: list of 1-based positions from the top.
+    E.g., [2] = drop-2, [3] = drop-3, [2, 4] = drop-2+4.
+    """
+    result = list(close_pitches)
+    n = len(result)
+    for idx in drop_indices:
+        pos = n - idx  # Convert top-relative to list index
+        if 0 < pos < n:  # Never drop the top voice (pos==n-1 is top, idx==1)
+            result[pos] -= 12
+    result.sort()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Open spread — pitch-class-preserving octave redistribution
+# ---------------------------------------------------------------------------
+def _spread_chord_tones(pitches, spread_amount, preserve_bass):
+    """Spread chord tones across octaves while preserving pitch classes.
+
+    Unlike linear interpolation, this only changes the OCTAVE of each note,
+    never the pitch class. The spread_amount (0.0-1.0) controls how far
+    apart adjacent voices are placed.
+    """
+    if len(pitches) < 3:
+        return list(pitches)
+
+    pcs = [(p % 12) for p in pitches]
+    center_oct = sum(pitches) / len(pitches)
+
+    # Target spacing in semitones between adjacent voices
+    spacing = int(6 + 14 * spread_amount)  # 6-20 semitones range
+
+    result = []
+    if preserve_bass:
+        result.append(pitches[0])
+        start_idx = 1
+        anchor = pitches[0]
+    else:
+        # Start from the center and spread outward
+        anchor_oct = int(center_oct // 12) * 12
+        first = anchor_oct + pcs[0]
+        while first > center_oct:
+            first -= 12
+        while first < center_oct - 12:
+            first += 12
+        result.append(first)
+        start_idx = 1
+        anchor = result[0]
+
+    # Place each subsequent voice at approximately 'spacing' above the last
+    for i in range(start_idx, len(pitches)):
+        pc = pcs[i]
+        target = result[-1] + spacing
+
+        # Find the octave placement of this pitch class nearest to target
+        best = pc
+        best_dist = 999
+        for octave in range(0, 11):
+            candidate = octave * 12 + pc
+            dist = abs(candidate - target)
+            if dist < best_dist:
+                best_dist = dist
+                best = candidate
+
+        # Ensure it's above the previous note
+        while best <= result[-1]:
+            best += 12
+
+        result.append(best)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Quartal voicing — chord-tone-based approximation
+# ---------------------------------------------------------------------------
+def _quartal_chord_tone_voicing(pitches):
+    """Reorder chord tones to approximate quartal (4th-based) intervals.
+
+    Instead of discarding all chord tones and building pure P4 stacks,
+    this finds the ordering of existing pitch classes that best approximates
+    perfect 4th intervals (5 semitones) between adjacent voices.
+    """
+    if len(pitches) < 2:
+        return list(pitches)
+
+    pcs = list(set(p % 12 for p in pitches))
+    if len(pcs) < 2:
+        return list(pitches)
+
+    # Try each pitch class as the starting note, pick the ordering
+    # that minimizes deviation from perfect 4ths
+    best_order = None
+    best_score = 999
+
+    for start_pc in pcs:
+        order = [start_pc]
+        remaining = [pc for pc in pcs if pc != start_pc]
+
+        while remaining:
+            target_pc = (order[-1] + 5) % 12  # Perfect 4th up
+            # Find nearest remaining PC to the target
+            closest = min(remaining, key=lambda pc: min(
+                (pc - target_pc) % 12, (target_pc - pc) % 12
+            ))
+            order.append(closest)
+            remaining.remove(closest)
+
+        # Score: sum of deviations from perfect 4ths
+        score = 0
+        for j in range(1, len(order)):
+            interval = (order[j] - order[j - 1]) % 12
+            score += abs(interval - 5)
+
+        if score < best_score:
+            best_score = score
+            best_order = order
+
+    # Place in ascending pitch from the bass
+    bass = pitches[0]
+    bass_oct = (bass // 12) * 12
+    result = []
+    for pc in best_order:
+        note_val = bass_oct + pc
+        if result:
+            while note_val <= result[-1]:
+                note_val += 12
+        else:
+            # Start near the original bass
+            while note_val < bass - 6:
+                note_val += 12
+            while note_val > bass + 6:
+                note_val -= 12
+        result.append(note_val)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Shell voicing with template-scoring root detection
+# ---------------------------------------------------------------------------
+
+# Interval templates for common chord types (root = 0)
+_CHORD_TEMPLATES = [
+    # (name, intervals, shell_intervals)
+    ('maj7',  {0, 4, 7, 11}, {0, 4, 11}),
+    ('min7',  {0, 3, 7, 10}, {0, 3, 10}),
+    ('dom7',  {0, 4, 7, 10}, {0, 4, 10}),
+    ('dim7',  {0, 3, 6, 9},  {0, 3, 9}),
+    ('m7b5',  {0, 3, 6, 10}, {0, 3, 10}),
+    ('maj',   {0, 4, 7},     {0, 4, 7}),
+    ('min',   {0, 3, 7},     {0, 3, 7}),
+    ('sus4',  {0, 5, 7},     {0, 5, 7}),
+    ('sus2',  {0, 2, 7},     {0, 2, 7}),
+    ('aug',   {0, 4, 8},     {0, 4, 8}),
+    ('dim',   {0, 3, 6},     {0, 3, 6}),
+]
+
+
+def _detect_root_and_shell(pitches):
+    """Detect the chord root via template scoring and return shell tones.
+
+    Tests every pitch class as a potential root against known chord
+    templates. The root with the highest match score wins. Returns
+    the shell intervals (root + 3rd + 7th or equivalent).
+    """
+    pcs = set(p % 12 for p in pitches)
+
+    best_root_pc = pitches[0] % 12
+    best_shell = {0}
+    best_score = -1
+
+    for candidate_root in pcs:
+        # Normalize all PCs relative to this candidate root
+        normalized = set((pc - candidate_root) % 12 for pc in pcs)
+
+        for _name, template, shell in _CHORD_TEMPLATES:
+            # Score = number of matching intervals
+            score = len(normalized & template)
+            # Bonus if all template tones are present
+            if template.issubset(normalized):
+                score += 2
+
+            if score > best_score:
+                best_score = score
+                best_root_pc = candidate_root
+                best_shell = shell
+
+    # Build shell pitches from original chord
+    result = []
+    for p in sorted(pitches):
+        interval = (p % 12 - best_root_pc) % 12
+        if interval in best_shell:
+            result.append(p)
+
+    # Ensure at least 2 notes
+    if len(result) < 2 and len(pitches) >= 2:
+        for p in sorted(pitches):
+            if p not in result:
+                result.append(p)
+                break
+
+    result.sort()
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Voice leading — per-voice nearest-octave placement
+# ---------------------------------------------------------------------------
+def _apply_voice_leading(new_pitches, prev_pitches, preserve_bass):
+    """Minimize total pitch movement from previous chord.
+
+    Maps each voice index to the same index in prev_pitches and finds
+    the nearest octave placement of the current pitch class. Preserves
+    voice identity by NOT sorting the result.
+    """
+    if prev_pitches is None or len(prev_pitches) < 2:
+        return new_pitches
+
+    pcs = [(p % 12) for p in new_pitches]
+    voiced = []
+
+    for i, pc in enumerate(pcs):
+        if i == 0 and preserve_bass:
+            voiced.append(new_pitches[0])
+            continue
+
+        # Map to same voice index in previous chord
+        if i < len(prev_pitches):
+            target = prev_pitches[i]
+        else:
+            target = prev_pitches[-1]
+
+        # Find nearest octave of this pitch class to the target
+        best = pc
+        best_dist = 999
+        for octave in range(0, 11):
+            candidate = octave * 12 + pc
+            dist = abs(candidate - target)
+            if dist < best_dist:
+                best_dist = dist
+                best = candidate
+
+        voiced.append(best)
+
+    return voiced
+
+
+# ---------------------------------------------------------------------------
+# Range fitting — chord-level octave transposition
+# ---------------------------------------------------------------------------
+def _fit_to_range(pitches, range_low, range_high, preserve_bass):
+    """Transpose entire chord by octaves to fit within range bounds.
+
+    Instead of moving individual notes (which destroys voicing intervals),
+    this shifts the whole chord up or down by octaves until it fits.
+    If the chord is too wide for the range, individual notes are then
+    clamped as a last resort.
+    """
+    if range_low == 0 and range_high >= 131:
+        return pitches  # No range constraint
+
+    result = list(pitches)
+
+    # First: try chord-level octave transposition
+    lowest = min(result)
+    highest = max(result)
+
+    # Shift entire chord up if below range
+    while lowest < range_low and highest + 12 <= range_high:
+        result = [p + 12 for p in result]
+        lowest = min(result)
+        highest = max(result)
+
+    # Shift entire chord down if above range
+    while highest > range_high and lowest - 12 >= range_low:
+        result = [p - 12 for p in result]
+        lowest = min(result)
+        highest = max(result)
+
+    # Last resort: per-note octave clamping for notes still out of range
+    for i in range(len(result)):
+        if i == 0 and preserve_bass:
+            while result[i] < range_low:
+                result[i] += 12
+            while result[i] > range_high:
+                result[i] -= 12
+            continue
+        while result[i] < range_low:
+            result[i] += 12
+        while result[i] > range_high:
+            result[i] -= 12
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Apply — non-destructive, voice-identity-preserving
+# ---------------------------------------------------------------------------
+def apply(form):
+    voicing = int(form.GetInputValue('Voicing'))
+    range_mode = int(form.GetInputValue('Range'))
+    spread = form.GetInputValue('Spread Amount')
+    voice_lead = bool(form.GetInputValue('Voice Lead (smooth)'))
+    preserve_bass = bool(form.GetInputValue('Preserve Bass Note'))
+    selected_only = bool(form.GetInputValue('Selected Notes Only'))
+
+    ppq = flp.score.PPQ
+    tolerance = ppq // 8  # Notes within 1/32 note are simultaneous
+
+    range_low, range_high = RANGE_BOUNDS[range_mode]
+
+    # Collect notes and track source indices for non-destructive deletion
+    source_notes = []
+    source_indices = []
+    for i in range(flp.score.noteCount):
+        note = flp.score.getNote(i)
+        if selected_only and not note.selected:
+            pass  # Leave unselected notes untouched in the score
+        else:
+            source_notes.append(note)
+            source_indices.append(i)
+
+    if not source_notes:
+        return
+
+    # Group notes into chords (notes at same time)
+    sorted_pairs = sorted(
+        zip(source_notes, source_indices),
+        key=lambda pair: (pair[0].time, pair[0].number)
+    )
+    sorted_notes = [p[0] for p in sorted_pairs]
+    sorted_indices = [p[1] for p in sorted_pairs]
+
+    chord_groups = []
+    chord_index_groups = []
+    current_group = [sorted_notes[0]]
+    current_idx_group = [sorted_indices[0]]
+
+    for k in range(1, len(sorted_notes)):
+        n = sorted_notes[k]
+        if abs(n.time - current_group[0].time) <= tolerance:
+            current_group.append(n)
+            current_idx_group.append(sorted_indices[k])
+        else:
+            # Sort by pitch within each chord group
+            paired = sorted(zip(current_group, current_idx_group),
+                            key=lambda x: x[0].number)
+            chord_groups.append([p[0] for p in paired])
+            chord_index_groups.append([p[1] for p in paired])
+            current_group = [n]
+            current_idx_group = [sorted_indices[k]]
+
+    paired = sorted(zip(current_group, current_idx_group),
+                    key=lambda x: x[0].number)
+    chord_groups.append([p[0] for p in paired])
+    chord_index_groups.append([p[1] for p in paired])
+
+    # Process each chord group
+    prev_pitches = None
+    new_notes = []       # (source_note, new_pitch) pairs to add
+    indices_to_delete = []  # Original indices to remove
+
+    for gi, chord in enumerate(chord_groups):
+        pitches = [n.number for n in chord]
+
+        if len(pitches) < 2:
+            # Single notes pass through unchanged
+            prev_pitches = pitches
+            continue
+
+        new_pitches = list(pitches)
+
+        if voicing == 0:    # Drop 2
+            close = _close_position(pitches)
+            new_pitches = _drop_from_close(close, [2])
+
+        elif voicing == 1:  # Drop 3
+            close = _close_position(pitches)
+            new_pitches = _drop_from_close(close, [3])
+
+        elif voicing == 2:  # Drop 2+4
+            close = _close_position(pitches)
+            new_pitches = _drop_from_close(close, [2, 4])
+
+        elif voicing == 3:  # Open (spread)
+            new_pitches = _spread_chord_tones(pitches, spread, preserve_bass)
+
+        elif voicing == 4:  # Close (compact)
+            new_pitches = _close_position(pitches)
+
+        elif voicing == 5:  # Root + Shell
+            new_pitches = _detect_root_and_shell(pitches)
+
+        elif voicing == 6:  # Quartal (chord-tone)
+            new_pitches = _quartal_chord_tone_voicing(pitches)
+
+        # Apply voice leading overlay if enabled
+        if voice_lead and prev_pitches is not None:
+            new_pitches = _apply_voice_leading(new_pitches, prev_pitches,
+                                               preserve_bass)
+
+        # Apply range constraints (chord-level first, then per-note)
+        if range_mode != 0:
+            new_pitches = _fit_to_range(new_pitches, range_low, range_high,
+                                        preserve_bass)
+
+        # Clamp to FL Studio MIDI range (0-131, not 0-127)
+        new_pitches = [max(0, min(131, p)) for p in new_pitches]
+
+        # Record notes to create and indices to delete
+        for i in range(len(new_pitches)):
+            src = chord[i] if i < len(chord) else chord[-1]
+            new_notes.append((src, new_pitches[i]))
+
+        # Mark original chord notes for deletion (they'll be replaced)
+        indices_to_delete.extend(chord_index_groups[gi])
+
+        # Store pitches WITHOUT sorting to preserve voice identity
+        prev_pitches = list(new_pitches)
+
+    # --- Non-destructive score commit ---
+    # Delete source notes in descending index order (prevents index shifting)
+    for idx in sorted(set(indices_to_delete), reverse=True):
+        flp.score.deleteNote(idx)
+
+    # Add revoiced notes with full property preservation
+    for src, pitch in new_notes:
+        note = _clone_note(src, pitch=pitch)
+        flp.score.addNote(note)

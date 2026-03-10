@@ -1,0 +1,424 @@
+"""Bass Octave Doubler Pro - Phase-coherent bass layering engine.
+
+Creates doubled copies of notes at different octaves or intervals with
+professional acoustic awareness. Sub-bass layers are automatically
+mono-centered, filter-attenuated, and routed to separate MIDI channels.
+Features diatonic scale snapping for fifths/intervals, collision
+detection to prevent overlapping identical notes, and micro-timing
+offset for phase coherence between layers.
+
+Enhanced from audit recommendations for production-grade bass design.
+"""
+
+import flpianoroll as flp
+import math
+
+
+# ---------------------------------------------------------------------------
+# Mode and option definitions
+# ---------------------------------------------------------------------------
+DOUBLER_MODES = [
+    'Octave Down (-12)',
+    'Octave Up (+12)',
+    'Sub Bass (-24)',
+    'Double (up + down)',
+    'Fifth Below (-7)',
+    'Fifth Above (+7)',
+    'Power Stack (oct down + fifth)',
+    'Custom Interval',
+]
+
+LAYER_COLOR_OPTIONS = [
+    'Same as Source',
+    'Color 1',
+    'Color 2',
+    'Color 3',
+    'Color 4',
+    'Color 5',
+    'Color 6',
+    'Color 7',
+    'Color 8',
+    'Color 9',
+    'Color 10',
+    'Color 11',
+    'Color 12',
+    'Color 13',
+    'Color 14',
+    'Color 15',
+]
+
+SNAP_MODES = [
+    'Off (chromatic)',
+    'Nearest (snap to scale)',
+    'Up (snap up)',
+    'Down (snap down)',
+]
+
+
+# ---------------------------------------------------------------------------
+# LCG random & Box-Muller Gaussian (no stdlib random available)
+# ---------------------------------------------------------------------------
+_rng_state = 48271
+
+
+def _rand():
+    """Return uniform random float in [0, 1)."""
+    global _rng_state
+    _rng_state = (_rng_state * 1103515245 + 12345) & 0x7FFFFFFF
+    return _rng_state / 0x7FFFFFFF
+
+
+def _seed(val):
+    global _rng_state
+    _rng_state = max(1, int(val) & 0x7FFFFFFF)
+
+
+def _gauss(mu, sigma):
+    """Box-Muller transform for Gaussian random."""
+    u1 = max(1e-10, _rand())
+    u2 = _rand()
+    z = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+    return mu + sigma * z
+
+
+# ---------------------------------------------------------------------------
+# Scale snapping via snap_scale_helper bitmask
+# ---------------------------------------------------------------------------
+def _parse_scale_bitmask():
+    """Parse the C-aligned scale bitmask from the piano roll.
+
+    Returns a list of 12 ints where 0 = in scale, 1 = out of scale.
+    Returns None if no scale is set.
+    """
+    try:
+        helper = flp.score.snap_scale_helper
+        if not helper or helper.strip() == '':
+            return None
+        bits = [int(x.strip()) for x in helper.split(',')]
+        if len(bits) != 12:
+            return None
+        if 1 not in bits:
+            return None
+        return bits
+    except Exception:
+        return None
+
+
+def _snap_pitch(pitch, scale_bits, direction):
+    """Snap a MIDI pitch to the nearest diatonic note.
+
+    direction: 1 = nearest, 2 = up, 3 = down
+    """
+    if scale_bits is None or direction == 0:
+        return pitch
+
+    pc = pitch % 12
+    if scale_bits[pc] == 0:
+        return pitch  # Already in scale
+
+    if direction == 2:  # Snap Up
+        for offset in range(1, 12):
+            p = pitch + offset
+            if p > 127:
+                return pitch
+            if scale_bits[p % 12] == 0:
+                return p
+        return pitch
+
+    if direction == 3:  # Snap Down
+        for offset in range(1, 12):
+            p = pitch - offset
+            if p < 0:
+                return pitch
+            if scale_bits[p % 12] == 0:
+                return p
+        return pitch
+
+    # Nearest: check both directions
+    for offset in range(1, 7):
+        up_p = pitch + offset
+        down_p = pitch - offset
+        up_ok = up_p <= 127 and scale_bits[up_p % 12] == 0
+        down_ok = down_p >= 0 and scale_bits[down_p % 12] == 0
+        if up_ok and down_ok:
+            return down_p  # Tie: prefer down (more consonant for bass)
+        if down_ok:
+            return down_p
+        if up_ok:
+            return up_p
+
+    return pitch
+
+
+# ---------------------------------------------------------------------------
+# Clone helper — preserves ALL note properties including FL-specific ones
+# ---------------------------------------------------------------------------
+def _clone_note(src, pitch=None, time=None, length=None, velocity=None,
+                color=None, pan=None, fcut=None):
+    """Create a full copy of a Note with optional overrides."""
+    n = flp.Note()
+    n.number = pitch if pitch is not None else src.number
+    n.time = time if time is not None else src.time
+    n.length = length if length is not None else src.length
+    n.velocity = velocity if velocity is not None else src.velocity
+    n.color = color if color is not None else src.color
+    n.pan = pan if pan is not None else src.pan
+    n.fcut = fcut if fcut is not None else src.fcut
+    n.fres = src.fres
+    n.group = src.group
+    try:
+        n.pitchofs = src.pitchofs
+    except Exception:
+        pass
+    try:
+        n.slide = src.slide
+    except Exception:
+        pass
+    try:
+        n.porta = src.porta
+    except Exception:
+        pass
+    try:
+        n.muted = src.muted
+    except Exception:
+        pass
+    return n
+
+
+# ---------------------------------------------------------------------------
+# Acoustic profiling — adjust properties based on layer direction
+# ---------------------------------------------------------------------------
+def _apply_acoustic_profile(note, interval, sub_fcut, mono_sub):
+    """Apply mix-aware property adjustments based on the interval direction.
+
+    Sub-bass layers (interval < 0):
+      - Pan forced to 0.5 (mono) for phase coherence
+      - Filter cutoff attenuated to remove unwanted harmonics
+    Upper layers (interval > 0):
+      - Properties kept closer to source (brightness preserved)
+    """
+    if interval <= -12:
+        # Deep sub-bass layer: enforce mono + dark filter
+        if mono_sub:
+            note.pan = 0.5
+        # Attenuate filter cutoff for sub layers
+        if interval <= -24:
+            note.fcut = min(note.fcut, sub_fcut * 0.6)
+        else:
+            note.fcut = min(note.fcut, sub_fcut)
+    elif interval < 0:
+        # Near-sub layer (e.g., fifth below): moderate attenuation
+        if mono_sub:
+            note.pan = 0.5
+        note.fcut = min(note.fcut, sub_fcut * 1.2)
+
+    return note
+
+
+# ---------------------------------------------------------------------------
+# Control Surface .fst support
+# ---------------------------------------------------------------------------
+_FST_FILE = 'Bass Octave Doubler.fst'
+
+
+def _try_load_surface():
+    """Attempt to load the Control Surface .fst GUI."""
+    try:
+        form = flp.LoadSurface(_FST_FILE)
+        if form is not None:
+            return form
+    except Exception:
+        pass
+    return None
+
+
+def _build_standard_dialog():
+    """Build the standard ScriptDialog fallback UI."""
+    form = flp.ScriptDialog(
+        'Bass Octave Doubler Pro',
+        'Phase-coherent bass layering with acoustic awareness.\r\n\r\n'
+        'LAYERING: 8 modes including octave, fifth, power stack, custom.\r\n'
+        'Sub-bass layers are auto-mono and filter-attenuated.\r\n\r\n'
+        'ACOUSTIC: Micro-timing offset prevents comb filtering between\r\n'
+        'layers. Sub Filter Cutoff controls the darkness of sub layers.\r\n'
+        'Mono Sub forces sub-bass to center pan for mix coherence.\r\n\r\n'
+        'SCALE SNAP: Uses piano roll scale highlighting to snap fifths\r\n'
+        'and intervals to the active scale (prevents out-of-key notes).\r\n'
+        'Set your scale in Helpers > Scale highlighting first.\r\n\r\n'
+        'ROUTING: Layer Color routes generated notes to a different\r\n'
+        'MIDI channel so you can use a separate synth patch (e.g., pure\r\n'
+        'sine sub on one channel, mid-bass on another).\r\n\r\n'
+        'COLLISION: Duplicate notes at same time+pitch are automatically\r\n'
+        'prevented to avoid voice stealing and CPU spikes.\r\n\r\n'
+        'HUMANIZE: Adds subtle Gaussian velocity jitter for organic feel.'
+    )
+    # --- Layering ---
+    form.AddInputCombo('Mode', DOUBLER_MODES, 0)
+    form.AddInputKnobInt('Custom Interval', -12, -36, 36)
+    # --- Acoustic ---
+    form.AddInputKnob('Velocity Scale', 0.80, 0.10, 1.00)
+    form.AddInputKnob('Length Scale', 1.00, 0.25, 2.00)
+    form.AddInputKnob('Sub Filter Cutoff', 0.30, 0.05, 0.80)
+    form.AddInputKnobInt('Timing Offset (ticks)', 0, -20, 20)
+    form.AddInputKnob('Humanize', 0.00, 0.00, 0.10)
+    # --- Routing ---
+    form.AddInputCombo('Layer Color', LAYER_COLOR_OPTIONS, 0)
+    form.AddInputCheckbox('Mono Sub', True)
+    # --- Scale ---
+    form.AddInputCombo('Snap to Scale', SNAP_MODES, 0)
+    # --- Range ---
+    form.AddInputKnobInt('Low Limit (MIDI)', 24, 0, 60)
+    form.AddInputKnobInt('High Limit (MIDI)', 96, 60, 127)
+    # --- Options ---
+    form.AddInputCheckbox('Keep Original Notes', True)
+    form.AddInputCheckbox('Selected Notes Only', True)
+    return form
+
+
+def createDialog():
+    """Try Control Surface first, fall back to ScriptDialog."""
+    form = _try_load_surface()
+    if form is not None:
+        return form
+    return _build_standard_dialog()
+
+
+# ---------------------------------------------------------------------------
+# Apply — collision-safe, acoustic-aware, single commit
+# ---------------------------------------------------------------------------
+def apply(form):
+    mode = int(form.GetInputValue('Mode'))
+    custom_interval = int(form.GetInputValue('Custom Interval'))
+    vel_scale = form.GetInputValue('Velocity Scale')
+    len_scale = form.GetInputValue('Length Scale')
+    sub_fcut = form.GetInputValue('Sub Filter Cutoff')
+    timing_offset = int(form.GetInputValue('Timing Offset (ticks)'))
+    humanize = form.GetInputValue('Humanize')
+    layer_color_idx = int(form.GetInputValue('Layer Color'))
+    mono_sub = bool(form.GetInputValue('Mono Sub'))
+    snap_dir = int(form.GetInputValue('Snap to Scale'))
+    low_limit = int(form.GetInputValue('Low Limit (MIDI)'))
+    high_limit = int(form.GetInputValue('High Limit (MIDI)'))
+    keep_original = bool(form.GetInputValue('Keep Original Notes'))
+    selected_only = bool(form.GetInputValue('Selected Notes Only'))
+
+    # Determine intervals to double at
+    if mode == 0:      # Octave Down
+        intervals = [-12]
+    elif mode == 1:    # Octave Up
+        intervals = [12]
+    elif mode == 2:    # Sub Bass
+        intervals = [-24]
+    elif mode == 3:    # Double (up + down)
+        intervals = [-12, 12]
+    elif mode == 4:    # Fifth Below
+        intervals = [-7]
+    elif mode == 5:    # Fifth Above
+        intervals = [7]
+    elif mode == 6:    # Power Stack
+        intervals = [-12, 7]
+    elif mode == 7:    # Custom
+        intervals = [custom_interval]
+    else:
+        intervals = [-12]
+
+    # Parse scale bitmask for diatonic snapping
+    scale_bits = _parse_scale_bitmask() if snap_dir > 0 else None
+
+    # Layer color: 0 = same as source, 1-15 = specific color index
+    layer_color = None if layer_color_idx == 0 else (layer_color_idx - 1)
+
+    # Collect notes
+    source_notes = []
+    other_notes = []
+    for i in range(flp.score.noteCount):
+        note = flp.score.getNote(i)
+        if selected_only and not note.selected:
+            other_notes.append(note)
+        else:
+            source_notes.append(note)
+
+    if not source_notes:
+        return
+
+    # Seed RNG from note data for reproducible humanization
+    _seed(sum(n.time * 3 + n.number * 7 + n.length for n in source_notes))
+
+    # Build collision detection matrix — O(1) lookups
+    occupied = set()
+    for note in source_notes:
+        occupied.add((note.time, note.number))
+    for note in other_notes:
+        occupied.add((note.time, note.number))
+
+    # Generate doubled notes with acoustic profiling
+    doubled = []
+
+    for src in source_notes:
+        for interval in intervals:
+            # Calculate target pitch
+            new_pitch = src.number + interval
+
+            # Diatonic scale snapping (critical for fifths and non-octave intervals)
+            if scale_bits is not None and snap_dir > 0:
+                # Octave intervals (±12, ±24) don't need snapping — same pitch class
+                if abs(interval) % 12 != 0:
+                    new_pitch = _snap_pitch(new_pitch, scale_bits, snap_dir)
+
+            # Range checks
+            if new_pitch < low_limit or new_pitch > high_limit:
+                continue
+            if new_pitch < 0 or new_pitch > 127:
+                continue
+
+            # Micro-timing offset for phase coherence
+            new_time = max(0, src.time + timing_offset)
+
+            # Velocity with Gaussian humanization
+            new_vel = src.velocity * vel_scale
+            if humanize > 0:
+                jitter = _gauss(0.0, humanize)
+                new_vel += jitter
+            new_vel = max(0.01, min(1.0, new_vel))
+
+            # Length scaling
+            new_length = max(1, int(src.length * len_scale))
+
+            # Determine color for this layer
+            note_color = layer_color if layer_color is not None else src.color
+
+            # Collision detection — skip if (time, pitch) already occupied
+            coord = (new_time, new_pitch)
+            if coord in occupied:
+                continue
+
+            # Create the doubled note with full property preservation
+            n = _clone_note(
+                src,
+                pitch=new_pitch,
+                time=new_time,
+                length=new_length,
+                velocity=new_vel,
+                color=note_color,
+            )
+
+            # Apply acoustic profiling (sub-bass mono, filter attenuation)
+            n = _apply_acoustic_profile(n, interval, sub_fcut, mono_sub)
+
+            doubled.append(n)
+
+            # Update collision matrix to prevent self-collisions
+            occupied.add(coord)
+
+    # Non-destructive score commit
+    # Never use clearNotes(True) — it wipes notes outside the visible scope.
+    # This is a doubler: we only ADD notes. Existing notes stay untouched.
+    if not keep_original:
+        # Remove only the selected/source notes, keep everything else
+        flp.score.clearNotes(False)
+        # Re-add other (unselected) notes that clearNotes(False) preserved
+        # Note: clearNotes(False) clears selected notes only, so other_notes
+        # are already safe in the score. We just add the doubled notes.
+
+    for note in doubled:
+        flp.score.addNote(note)

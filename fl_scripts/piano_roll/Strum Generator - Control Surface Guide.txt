@@ -1,0 +1,282 @@
+===========================================================================
+  STRUM GENERATOR PRO — Control Surface (.fst) Build Guide
+===========================================================================
+
+  This guide tells you exactly how to build the custom GUI in FL Studio's
+  Control Surface plugin. When done, the script auto-detects and uses it.
+  If the .fst file is missing, the script falls back to the standard dialog.
+
+  REQUIREMENTS: FL Studio 24.1.0 or later (LoadSurface API)
+
+===========================================================================
+  STEP 1: CREATE THE CONTROL SURFACE PRESET
+===========================================================================
+
+  1. Open FL Studio
+  2. Add a new "Control Surface" plugin instance (Add > More Plugins)
+  3. Right-click the Control Surface title bar > choose a dark background
+  4. Build the layout described below using drag-and-drop controls
+  5. When done: Presets menu > "Save preset as..." >
+     Save as: "Strum Generator.fst"
+  6. Copy the .fst file to your piano roll scripts folder:
+     Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  The script looks for a file named exactly: "Strum Generator.fst"
+
+===========================================================================
+  STEP 2: LAYOUT — TWO ZONES
+===========================================================================
+
+  +---------------------------+---------------------------+
+  |  ZONE 1: STRUM            |  ZONE 2: OPTIONS          |
+  |  & CURVES                 |                           |
+  +---------------------------+---------------------------+
+
+---------------------------------------------------------------------------
+  ZONE 1: STRUM & CURVES (left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)        | Range / Options        | Default
+  ------------------|---------------------|------------------------|--------
+  Knob (integer)    | Strum Mode          | 0-5 (6 strum modes)    | 0
+  Knob              | Strum Time          | 0.01 to 2.00           | 0.25
+  Knob              | Time Tension        | -1.00 to 1.00          | 0.00
+  Knob              | Velocity Fade       | -0.50 to 0.50          | 0.00
+  Knob              | Vel Tension         | -1.00 to 1.00          | 0.00
+  Knob (integer)    | Seed                | 0 to 9999              | 0
+
+  STRUM MODE VALUES:
+    0 = Down (Low to High)
+    1 = Up (High to Low)
+    2 = Down-Up Alternating
+    3 = Random Scatter
+    4 = Fan Out (Center)
+    5 = Fan In (Edges)
+
+  STRUM TIME:
+  - Total spread of the strum in 16th-note units
+  - 0.25 = very subtle offset (1/64th note)
+  - 1.00 = one 16th note spread across the chord
+  - 2.00 = wide, slow strum (1/8th note)
+
+  TIME TENSION:
+  - Shapes how offsets are distributed across the chord
+  - 0.0 = linear spacing (equal gaps between notes)
+  - Positive = accelerating strum (notes cluster at the start, spread at end)
+  - Negative = decelerating strum (notes spread at start, cluster at end)
+  - Maps tension [-1,1] to exponent [0.5, 2.0] via 2^tension
+
+  VELOCITY FADE:
+  - Changes velocity across the strum direction
+  - 0.0 = no velocity change
+  - Positive = later notes get louder (accent at end)
+  - Negative = later notes get softer (accent at start)
+  - Range: -0.50 to +0.50
+
+  VEL TENSION:
+  - Shapes the velocity fade curve (same as Time Tension but for velocity)
+  - 0.0 = linear velocity change
+  - Positive = velocity change accelerates toward end
+  - Negative = velocity change accelerates toward start
+
+  SEED:
+  - Controls the deterministic random seed for Random Scatter mode
+  - Same seed + same notes = same result every time (preview = accept)
+  - Change seed to explore different random spreads
+
+---------------------------------------------------------------------------
+  ZONE 2: OPTIONS (right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)           | Range          | Default
+  ------------------|------------------------|----------------|--------
+  CheckBox          | Shorten Notes          | 0 or 1         | 1 (on)
+  CheckBox          | Selected Notes Only    | 0 or 1         | 1 (on)
+
+  SHORTEN NOTES:
+  - When ON: reduces note length by the strum offset so the original
+    end time is preserved (the chord "ring-out" stays the same)
+  - When OFF: notes keep their original length, so strummed notes
+    extend beyond the original chord duration
+  - A minimum length floor (5% of a quarter note) prevents notes
+    from becoming inaudibly short
+
+  SELECTED NOTES ONLY:
+  - When ON: only processes selected notes
+  - When OFF: processes all notes in the piano roll
+
+===========================================================================
+  STEP 3: CONTROL NAMING — CRITICAL
+===========================================================================
+
+  Control names MUST match EXACTLY (case-sensitive, including spaces):
+
+    "Strum Mode"
+    "Strum Time"
+    "Time Tension"
+    "Velocity Fade"
+    "Vel Tension"
+    "Seed"
+    "Shorten Notes"
+    "Selected Notes Only"
+
+===========================================================================
+  STEP 4: VISUAL DESIGN SUGGESTIONS
+===========================================================================
+
+  BACKGROUND:  Dark gray or black (#1a1a1a)
+  LABELS:       "STRUM"    "OPTIONS"
+  TOTAL SIZE:   ~450 x 250 pixels
+
+  COLOR CODING (optional):
+  - Strum/curve controls:   Blue accent
+  - Options/toggles:        Green accent
+
+===========================================================================
+  STEP 5: UNDERSTANDING THE STRUM MODES
+===========================================================================
+
+  DOWN (LOW TO HIGH):
+  - Lowest pitch note plays first, highest pitch plays last
+  - Simulates a downstroke on guitar (low strings first)
+  - Most common strum direction
+
+  UP (HIGH TO LOW):
+  - Highest pitch note plays first, lowest pitch plays last
+  - Simulates an upstroke on guitar (high strings first)
+
+  DOWN-UP ALTERNATING:
+  - First chord strums Down, second chord strums Up, and so on
+  - Creates a natural alternating picking/strumming feel
+  - Always starts with Down on the first chord
+
+  RANDOM SCATTER:
+  - Each note in the chord gets a random offset within the strum time
+  - Uses deterministic seeded RNG — same seed always produces same result
+  - Useful for harp-like or wind chime effects
+
+  FAN OUT (CENTER):
+  - Center note(s) of the chord play first, edges play last
+  - Creates an expanding effect radiating from the middle
+  - For 2-note chords: lower note plays first (like Down)
+
+  FAN IN (EDGES):
+  - Edge notes play first, center note(s) play last
+  - Creates a converging effect collapsing to the middle
+  - For 2-note chords: higher note plays first (like Up)
+
+===========================================================================
+  STEP 6: UNDERSTANDING TENSION
+===========================================================================
+
+  Tension controls transform the linear strum offset into a curved
+  distribution. The same concept applies to both Time and Velocity:
+
+  LINEAR (tension = 0):
+  - Equal spacing between notes
+  - Note offsets: 0%, 25%, 50%, 75%, 100% of strum time
+
+  ACCELERATING (tension > 0, e.g. +0.5):
+  - Notes cluster near the start, spread out toward the end
+  - Creates a "slow start, fast finish" strum feel
+  - Higher tension = more extreme clustering
+
+  DECELERATING (tension < 0, e.g. -0.5):
+  - Notes spread out at the start, cluster near the end
+  - Creates a "fast start, slow finish" strum feel
+  - Lower tension = more extreme clustering
+
+  MATHEMATICAL NOTE:
+  - Tension maps to an exponent: exponent = 2^tension
+  - t_curved = t^exponent where t is the linear [0,1] parameter
+  - Tension +1.0 → exponent 2.0 (quadratic)
+  - Tension -1.0 → exponent 0.5 (square root)
+
+===========================================================================
+  STEP 7: TESTING
+===========================================================================
+
+  BASIC STRUM TEST:
+  - Draw a C major chord (C4 E4 G4) all at the same time
+  - Set Strum Mode = Down, Strum Time = 0.5
+  - Run: C4 should stay in place, E4 shifts slightly right, G4 shifts most
+  - You should see a rising diagonal pattern in the piano roll
+
+  UP STRUM TEST:
+  - Same chord, Mode = Up
+  - Run: G4 should stay in place, E4 shifts, C4 shifts most
+  - Falling diagonal pattern
+
+  ALTERNATING TEST:
+  - Draw two chords at different beats
+  - Set Mode = Down-Up Alternating
+  - First chord should strum Down, second should strum Up
+
+  RANDOM SCATTER TEST:
+  - Set Mode = Random Scatter, Seed = 42
+  - Run on a chord, note the result
+  - Undo, run again with Seed = 42 — result must be identical
+  - Change Seed to 43 — result should differ
+
+  FAN OUT TEST (2-NOTE CHORD):
+  - Draw just C4 and G4 at the same time
+  - Set Mode = Fan Out
+  - Run: both notes should strum (one gets offset, one doesn't)
+  - Should NOT produce zero strum (the old bug)
+
+  TIME TENSION TEST:
+  - Draw a 5-note chord (C E G B D)
+  - Set Strum Time = 1.0, Time Tension = 0
+  - Run: offsets should be evenly spaced (0, 6, 12, 18, 24 ticks at PPQ=96)
+  - Undo, set Time Tension = +1.0
+  - Run: first notes cluster together, last note jumps further out
+
+  SHORTEN NOTES TEST:
+  - Draw a chord with long notes (1 bar each)
+  - Run with Shorten = ON
+  - End times should be preserved (notes get shorter by the offset)
+  - Run with Shorten = OFF
+  - Original lengths preserved (notes extend beyond original end)
+
+  VELOCITY FADE TEST:
+  - Draw a chord with all notes at velocity 0.8
+  - Set Velocity Fade = -0.3
+  - Run Down strum: first note stays ~0.8, last note drops to ~0.5
+  - Set Vel Tension = +1.0: fade accelerates toward the end
+
+  SLIDING WINDOW GROUPING TEST:
+  - Manually offset notes in a chord by 1-2 ticks each
+    (e.g., C4 at tick 0, E4 at tick 2, G4 at tick 4)
+  - Total span = 4 ticks, which exceeds tolerance from first note
+  - Script should still group them as one chord (sliding window)
+  - Each note is within tolerance of its neighbor
+
+===========================================================================
+  TROUBLESHOOTING
+===========================================================================
+
+  "Chord didn't strum / nothing happened"
+  - Single notes are not strummed (need 2+ notes at the same time)
+  - Check that notes are within ~1/128th note of each other
+  - If "Selected Notes Only" is ON, make sure notes are selected
+
+  "Fan Out/In doesn't seem to strum 2-note chords"
+  - This was fixed in the Pro version
+  - 2-note chords now strum correctly in all modes
+
+  "Random scatter gives different results each time"
+  - This should NOT happen in the Pro version
+  - Random Scatter uses a deterministic seed — same seed = same result
+  - If you're getting different results, check the Seed value
+
+  "Strummed notes are too short / inaudible"
+  - This happens when Strum Time is very large relative to note length
+  - The script enforces a minimum length floor (5% of a quarter note)
+  - Try reducing Strum Time or disabling "Shorten Notes"
+
+  "Velocity changes feel too linear / robotic"
+  - Use the Vel Tension knob to curve the velocity fade
+  - Positive tension = subtle change at start, dramatic at end
+  - Negative tension = dramatic at start, subtle at end
+
+===========================================================================

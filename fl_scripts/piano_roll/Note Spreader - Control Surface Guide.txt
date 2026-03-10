@@ -1,0 +1,210 @@
+===========================================================================
+  NOTE SPREADER PRO — Control Surface (.fst) Build Guide
+===========================================================================
+
+  This guide tells you exactly how to build the custom GUI in FL Studio's
+  Control Surface plugin. When done, the script auto-detects and uses it.
+  If the .fst file is missing, the script falls back to the standard dialog.
+
+  REQUIREMENTS: FL Studio 24.1.0 or later (LoadSurface API)
+
+===========================================================================
+  STEP 1: CREATE THE CONTROL SURFACE PRESET
+===========================================================================
+
+  1. Open FL Studio
+  2. Add a new "Control Surface" plugin instance (Add > More Plugins)
+  3. Right-click the Control Surface title bar > choose a dark background
+  4. Build the layout described below using drag-and-drop controls
+  5. When done: Presets menu > "Save preset as..." >
+     Save as: "Note Spreader.fst"
+  6. Copy the .fst file to your piano roll scripts folder:
+     Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  The script looks for a file named exactly: "Note Spreader.fst"
+
+===========================================================================
+  STEP 2: LAYOUT — THREE ZONES
+===========================================================================
+
+  +---------------------+---------------------+------------------+
+  |  ZONE 1: MODE       |  ZONE 2: RANGES     |  ZONE 3: OPTIONS |
+  |  & AMOUNT           |  (Min/Max)           |                  |
+  +---------------------+---------------------+------------------+
+
+---------------------------------------------------------------------------
+  ZONE 1: MODE & AMOUNT (left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)         | Range / Options       | Default
+  ------------------|----------------------|-----------------------|--------
+  Knob (integer)  | Spread Mode          | 0-8 (9 spread modes)  | 0
+  Knob (integer)  | Note Order           | 0-2 (3 order modes)   | 0
+  Knob       | Amount               | 0.00 to 1.00          | 1.00
+  Knob (integer) | Seed                 | 0 to 9999             | 0
+
+  SPREAD MODE VALUES:
+    0 = Pan - Left to Right by Pitch
+    1 = Pan - Alternate Left/Right
+    2 = Pan - Random (Seeded)
+    3 = Color - By Pitch Class
+    4 = Color - By Octave
+    5 = Color - Alternate
+    6 = Velocity - By Pitch
+    7 = Filter Cutoff (Mod X) - By Pitch
+    8 = Combined - Pan + Color
+
+  NOTE ORDER VALUES:
+    0 = Time then Pitch (recommended)
+    1 = Pitch then Time
+    2 = As Returned (Score Index)
+
+  AMOUNT:
+  - Blend from original value to target mapping
+  - 0.00 = no change (safety — nothing happens)
+  - 1.00 = fully apply the mapping
+  - Works consistently across ALL modes including color
+  - For color: Amount=0.5 blends halfway from original to target color
+
+  SEED:
+  - Used by "Pan - Random (Seeded)" mode
+  - Deterministic: same seed + same notes = same result every time
+  - Preview matches accept (no more "what I saw is not what I got")
+  - Change seed to explore different random spreads
+
+---------------------------------------------------------------------------
+  ZONE 2: RANGES — Min/Max (center panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)         | Range          | Default
+  ------------------|----------------------|----------------|--------
+  Knob       | Pan Min              | 0.00 to 1.00  | 0.00
+  Knob       | Pan Max              | 0.00 to 1.00  | 1.00
+  Knob       | Velocity Min         | 0.00 to 1.00  | 0.40
+  Knob       | Velocity Max         | 0.00 to 1.00  | 1.00
+  Knob       | ModX Min             | 0.00 to 1.00  | 0.00
+  Knob       | ModX Max             | 0.00 to 1.00  | 1.00
+
+  PAN MIN/MAX:
+  - Constrains pan spread range (0.0 = hard left, 1.0 = hard right)
+  - Example: Pan Min=0.2, Pan Max=0.8 keeps spread within 20%-80%
+  - Used by Pan modes (0, 1, 2) and Combined (8)
+
+  VELOCITY MIN/MAX:
+  - Constrains velocity mapping range
+  - Example: Vel Min=0.5 prevents notes from becoming too quiet
+  - Used by Velocity mode (6)
+
+  MODX MIN/MAX:
+  - Constrains filter cutoff (Mod X) mapping range
+  - Used by Filter Cutoff mode (7)
+
+  NOTE: If Min > Max, they are automatically swapped.
+
+---------------------------------------------------------------------------
+  ZONE 3: OPTIONS (right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)            | Range / Options | Default
+  ------------------|-------------------------|-----------------|--------
+  Knob (integer) | Max Colors              | 2 to 16         | 16
+  CheckBox     | Ignore Muted Notes      | 0 or 1          | 1 (on)
+  CheckBox     | Selected Notes Only     | 0 or 1          | 1 (on)
+
+  MAX COLORS:
+  - Maximum number of color groups to use in color modes
+  - Color groups map to MIDI channels in FL Studio
+  - 2 = only use Colors 0-1, 16 = use all available colors
+
+  IGNORE MUTED NOTES:
+  - When ON: muted notes are skipped (not modified)
+  - Prevents accidental changes to notes the user has muted
+
+===========================================================================
+  STEP 3: CONTROL NAMING — CRITICAL
+===========================================================================
+
+  Control names MUST match EXACTLY (case-sensitive, including spaces):
+
+    "Spread Mode"
+    "Note Order"
+    "Amount"
+    "Seed"
+    "Pan Min"
+    "Pan Max"
+    "Velocity Min"
+    "Velocity Max"
+    "ModX Min"
+    "ModX Max"
+    "Max Colors"
+    "Ignore Muted Notes"
+    "Selected Notes Only"
+
+===========================================================================
+  STEP 4: VISUAL DESIGN SUGGESTIONS
+===========================================================================
+
+  BACKGROUND:  Dark gray or black (#1a1a1a)
+  LABELS:       "MODE"    "RANGES"    "OPTIONS"
+  TOTAL SIZE:   ~600 x 300 pixels
+
+  COLOR CODING (optional):
+  - Mode controls:     Blue accent
+  - Range knobs:       Orange/amber accent
+  - Options:           Green accent
+
+===========================================================================
+  STEP 5: TESTING
+===========================================================================
+
+  SEED STABILITY TEST:
+  - Set Spread Mode = "Pan - Random (Seeded)", Seed = 42
+  - Note the pan positions of all notes
+  - Change Amount to 0.5, then back to 1.0
+  - Pan positions must be identical to the first result
+  - Click Accept — committed result must match preview
+
+  NOTE ORDER TEST:
+  - Create notes in non-chronological order (add C5 first, then C3)
+  - Set Spread Mode = "Pan - Alternate Left/Right"
+  - With Note Order = "Time then Pitch": alternation follows time order
+  - With Note Order = "As Returned": alternation follows creation order
+
+  AMOUNT CONSISTENCY TEST:
+  - Set Amount = 0 on ANY mode — no properties should change
+  - Set Amount = 0.5 on "Color - By Pitch Class"
+  - Colors should blend halfway from original to target
+  - This confirms Amount works on color modes (previously ignored)
+
+  RANGE TEST:
+  - Set Pan Min = 0.2, Pan Max = 0.8
+  - Run "Pan - Left to Right by Pitch"
+  - All pan values should stay between 0.2 and 0.8
+  - No notes should reach hard left (0.0) or hard right (1.0)
+
+===========================================================================
+  TROUBLESHOOTING
+===========================================================================
+
+  "Random pan spread changes every time I click Accept"
+  - This should NOT happen in the Pro version
+  - Random modes use deterministic per-note hashing with the Seed value
+  - Same Seed = same result, always
+
+  "Alternate mode doesn't follow the pattern I expect"
+  - Check Note Order — "As Returned" uses whatever internal order
+    FL Studio stores notes in, which may not be time-sequential
+  - Switch to "Time then Pitch" for predictable alternation
+
+  "Slide notes stopped working after color change"
+  - FL Studio applies slide behavior per color group
+  - Changing a slide note's color may break its connection to the
+    target note if they're now in different color groups
+  - This is an FL Studio behavior, not a script bug
+
+  "Amount doesn't seem to do anything on color modes"
+  - It does in the Pro version! Amount=0 = no change, Amount=1 = full
+  - At low amounts (0.1-0.3), color blending rounds to nearest integer
+    so small changes may not be visible until Amount is higher
+
+===========================================================================

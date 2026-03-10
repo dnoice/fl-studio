@@ -1,0 +1,322 @@
+===========================================================================
+  NOTE LENGTH SHAPER PRO — Control Surface (.fst) Build Guide
+===========================================================================
+
+  This guide tells you exactly how to build the custom GUI in FL Studio's
+  Control Surface plugin. When done, the script auto-detects and uses it.
+  If the .fst file is missing, the script falls back to the standard dialog.
+
+  REQUIREMENTS: FL Studio 24.1.0 or later (LoadSurface API)
+
+===========================================================================
+  STEP 1: CREATE THE CONTROL SURFACE PRESET
+===========================================================================
+
+  1. Open FL Studio
+  2. Add a new "Control Surface" plugin instance (Add > More Plugins)
+  3. Right-click the Control Surface title bar > choose a dark background
+  4. Build the layout described below using drag-and-drop controls
+  5. When done: Presets menu > "Save preset as..." >
+     Save as: "Note Length Shaper.fst"
+  6. Copy the .fst file to your piano roll scripts folder:
+     Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  The script looks for a file named exactly: "Note Length Shaper.fst"
+
+===========================================================================
+  STEP 2: LAYOUT — THREE ZONES
+===========================================================================
+
+  +---------------------+---------------------+------------------+
+  |  ZONE 1: MODE       |  ZONE 2: CURVE      |  ZONE 3: OPTIONS |
+  |  & LENGTH           |  & HUMANIZE          |  & BEHAVIOR      |
+  +---------------------+---------------------+------------------+
+
+---------------------------------------------------------------------------
+  ZONE 1: MODE & LENGTH (left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)         | Range / Options        | Default
+  ------------------|----------------------|------------------------|--------
+  Knob (integer)  | Mode                 | 0-8 (9 length modes)   | 0
+  Knob (integer)  | Legato Target        | 0-1 (2 target modes)   | 0
+  Knob       | Amount (%)           | 0.01 to 2.00           | 0.50
+  Knob (integer)  | Fixed Grid           | 0-8 (9 grid values)    | 4
+
+  MODE VALUES:
+    0 = Percentage (scale current length)
+    1 = Fixed Length (grid value)
+    2 = Staccato (short & punchy)
+    3 = Legato (extend to next note)
+    4 = Legato with Overlap
+    5 = Fill Gap (percentage of gap)
+    6 = Curve Over Time
+    7 = Humanize Lengths
+    8 = Quantize Lengths to Grid
+
+  LEGATO TARGET VALUES:
+    0 = Same Pitch (polyphonic) — extends to next note of same MIDI pitch
+    1 = Any Note (monophonic) — extends to absolute next chronological note
+
+  LEGATO TARGET:
+  - Only affects modes 3 (Legato), 4 (Legato with Overlap), and 5 (Fill Gap)
+  - "Same Pitch" is the default and handles polyphonic textures correctly:
+    each voice (pitch) extends independently to its own next occurrence
+  - "Any Note" is the original monophonic behavior: good for solo melodies
+    but will truncate chord voices incorrectly
+
+  FIXED GRID VALUES:
+    0 = 1 Bar
+    1 = 1/2 Note
+    2 = 1/4 Note
+    3 = 1/8 Note
+    4 = 1/16 Note
+    5 = 1/32 Note
+    6 = 1/4 Triplet
+    7 = 1/8 Triplet
+    8 = 1/16 Triplet
+
+---------------------------------------------------------------------------
+  ZONE 2: CURVE & HUMANIZE (center panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)            | Range          | Default
+  ------------------|-------------------------|----------------|--------
+  Knob (integer)  | Curve Type              | 0-7 (8 types)  | 0
+  Knob       | Curve Min Factor        | 0.05 to 1.00  | 0.30
+  Knob       | Curve Max Factor        | 1.00 to 4.00  | 2.00
+  Knob       | Humanize                | 0.00 to 1.00  | 0.20
+
+  CURVE TYPE VALUES:
+    0 = Linear
+    1 = Ease In (Quadratic) — slow start, fast end
+    2 = Ease Out (Quadratic) — fast start, slow end
+    3 = Ease In-Out (Sine) — smooth S-curve
+    4 = Exponential In — very slow start, sudden burst
+    5 = Exponential Out — sudden burst, slow tail
+    6 = Triangle — grows then shrinks (or vice versa)
+    7 = Random (Seeded) — deterministic per-note random
+
+  CURVE MIN/MAX FACTOR:
+  - Controls the range of the length scaling factor
+  - Default: Min=0.3, Max=2.0
+  - The easing function output (0.0 to 1.0) is mapped to this range
+  - Example: with Linear curve, Min=0.5, Max=1.5:
+    first note gets factor 0.5 (halved), last note gets 1.5 (50% longer)
+  - Amount (%) further scales the result
+
+  HUMANIZE:
+  - Controls the standard deviation of Gaussian (bell-curve) variation
+  - Uses Box-Muller transform for organic, natural-sounding variation
+  - 0.00 = no variation (perfectly uniform lengths)
+  - 1.00 = maximum variation (~25% standard deviation)
+  - Most notes cluster near the original length with rare outliers
+  - Much more natural than uniform random scatter
+
+---------------------------------------------------------------------------
+  ZONE 3: OPTIONS & BEHAVIOR (right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)            | Range          | Default
+  ------------------|-------------------------|----------------|--------
+  Knob       | Min Length (%)           | 0.01 to 0.50  | 0.05
+  Knob (integer) | Overlap (ticks)         | 0 to 100      | 10
+  Knob (integer) | Seed                    | 0 to 9999     | 0
+  CheckBox     | Ignore Muted Notes      | 0 or 1         | 1 (on)
+  CheckBox     | Selected Notes Only     | 0 or 1         | 1 (on)
+
+  MIN LENGTH (%):
+  - Minimum note length as a percentage of one quarter note (PPQ)
+  - Prevents notes from being shortened to inaudible lengths
+  - 0.05 = 5% of a quarter note (very short but audible)
+  - Applied as a floor after all length calculations
+
+  OVERLAP (ticks):
+  - Extra ticks added beyond the next note's start time
+  - Only used in "Legato with Overlap" mode
+  - Creates smooth transitions between notes (portamento-friendly)
+  - 0 = exact legato (no overlap), 10 = slight overlap for smooth joins
+
+  SEED:
+  - Controls the deterministic random seed for Humanize and Random Curve
+  - Same seed always produces the same result (preview = accept)
+  - Change seed to get a different random pattern
+
+  IGNORE MUTED NOTES:
+  - When ON: muted notes are left completely untouched
+  - When OFF: muted notes are processed like any other note
+
+  SELECTED NOTES ONLY:
+  - When ON: only processes selected notes
+  - When OFF: processes all notes in the piano roll
+
+===========================================================================
+  STEP 3: CONTROL NAMING — CRITICAL
+===========================================================================
+
+  Control names MUST match EXACTLY (case-sensitive, including spaces):
+
+    "Mode"
+    "Legato Target"
+    "Amount (%)"
+    "Fixed Grid"
+    "Curve Type"
+    "Curve Min Factor"
+    "Curve Max Factor"
+    "Min Length (%)"
+    "Overlap (ticks)"
+    "Humanize"
+    "Seed"
+    "Ignore Muted Notes"
+    "Selected Notes Only"
+
+===========================================================================
+  STEP 4: VISUAL DESIGN SUGGESTIONS
+===========================================================================
+
+  BACKGROUND:  Dark gray or black (#1a1a1a)
+  LABELS:       "MODE"    "CURVE"    "OPTIONS"
+  TOTAL SIZE:   ~600 x 300 pixels
+
+  COLOR CODING (optional):
+  - Mode/Length controls:   Blue accent
+  - Curve/Humanize:         Orange/amber accent
+  - Options/toggles:        Green accent
+
+===========================================================================
+  STEP 5: UNDERSTANDING THE MODES
+===========================================================================
+
+  PERCENTAGE:
+  - Multiplies every note's length by the Amount (%) value
+  - Amount 0.50 = halve all lengths, Amount 2.00 = double them
+  - Simple and predictable for batch scaling
+
+  FIXED LENGTH:
+  - Sets every note to exactly one grid step value
+  - Ignores the original length entirely
+  - Great for normalizing drums to consistent lengths
+
+  STACCATO:
+  - Shortens notes to a fraction of the grid step
+  - Amount controls how short: 0.01 = extremely short, 1.0 = full grid step
+  - Never exceeds the original note length (won't lengthen short notes)
+
+  LEGATO (EXTEND TO NEXT NOTE):
+  - Extends each note to reach the start of the next note
+  - "Same Pitch" mode: finds next note of the SAME MIDI pitch
+    (correct for chords — each voice extends independently)
+  - "Any Note" mode: finds the absolute next chronological note
+    (correct for monophonic melodies only)
+
+  LEGATO WITH OVERLAP:
+  - Same as Legato, plus adds the Overlap (ticks) value
+  - Creates smooth note transitions for portamento and glide effects
+
+  FILL GAP:
+  - Extends notes partially into the gap before the next note
+  - Amount controls how much of the gap to fill (0.5 = half the gap)
+  - Only extends if there IS a gap (doesn't shorten overlapping notes)
+
+  CURVE OVER TIME:
+  - Applies a time-varying length multiplier across the selection
+  - Uses standard easing functions for organic, non-linear curves
+  - Curve Min/Max Factor controls the scaling range
+  - Amount further scales the result
+  - Great for creating gradual articulation changes (staccato → legato)
+
+  HUMANIZE:
+  - Adds Gaussian-distributed random variation to note lengths
+  - Uses Box-Muller transform: most notes stay near original length,
+    with occasional slight deviations (bell curve distribution)
+  - Much more natural than uniform random variation
+  - Seed ensures preview matches accept
+
+  QUANTIZE TO GRID:
+  - Snaps each note's length to the nearest multiple of the grid step
+  - Useful for cleaning up manually drawn or recorded MIDI
+
+===========================================================================
+  STEP 6: TESTING
+===========================================================================
+
+  POLYPHONIC LEGATO TEST:
+  - Draw C4 and E4 at beat 1, then C4 and E4 at beat 3
+  - Set Mode = Legato, Legato Target = Same Pitch
+  - Run: C4 at beat 1 should extend to beat 3's C4 start time
+  - E4 at beat 1 should extend to beat 3's E4 start time
+  - Neither should truncate to the other pitch
+
+  MONOPHONIC LEGATO TEST:
+  - Draw a simple melody: C4, D4, E4, F4 at consecutive beats
+  - Set Mode = Legato, Legato Target = Any Note
+  - Run: each note should extend to the next note's start time
+  - Last note stays at its original length
+
+  PERFORMANCE TEST:
+  - Select 5000+ notes (dense orchestral passage)
+  - Run Legato mode — should complete instantly, no interface lag
+  - The O(n log n) pitch-mapped lookup prevents quadratic slowdown
+
+  HUMANIZE DISTRIBUTION TEST:
+  - Draw 50+ notes with identical lengths
+  - Run Humanize with Amount = 1.0
+  - Most lengths should cluster near the original (bell curve)
+  - A few outliers should be slightly shorter/longer
+  - Should NOT see uniform scatter across the range
+
+  PROPERTY PRESERVATION TEST:
+  - Create a slide note (common in trap 808 basslines)
+  - Run Percentage mode with Amount = 0.5
+  - The slide flag, velocity, color, pan must all survive
+  - In-place mutation guarantees this automatically
+
+  UNDO TEST:
+  - Run any mode on some notes
+  - Press Ctrl+Z — should cleanly undo all length changes
+  - No duplicated or ghost notes (in-place mutation = clean undo)
+
+  SEED STABILITY TEST:
+  - Set Seed = 42, run Humanize
+  - Note the resulting lengths
+  - Change Humanize amount, change back to same value
+  - Lengths must be identical to the first run
+  - Accept — result must match the preview
+
+  CURVE EASING TEST:
+  - Draw 8 equal-length notes across 2 bars
+  - Set Mode = Curve Over Time, Curve Type = Ease In (Quadratic)
+  - Run: first notes should barely change, last notes dramatically longer
+  - Switch to Ease Out: first notes change a lot, last notes barely change
+  - Switch to Triangle: middle notes longest, edges shortest
+
+===========================================================================
+  TROUBLESHOOTING
+===========================================================================
+
+  "Legato is connecting wrong notes in chords"
+  - Switch Legato Target to "Same Pitch (polyphonic)"
+  - This ensures each pitch only connects to its own next occurrence
+  - "Any Note" mode is only correct for single-voice melodies
+
+  "Humanize sounds too mechanical / uniform"
+  - This should NOT happen with the Pro version
+  - The script uses Gaussian (bell-curve) distribution, not uniform
+  - If variation seems too subtle, increase the Humanize amount
+
+  "Curve mode doesn't seem to do anything"
+  - Check that Amount (%) is not set to 1.0 with Min/Max both at 1.0
+  - The curve factor is multiplied by Amount, so Amount=1.0 with
+    Min=Max=1.0 results in no change
+
+  "Notes are disappearing / becoming too short"
+  - Increase the Min Length (%) value
+  - This sets a floor preventing notes from being shortened to zero
+
+  "Script is slow on large selections"
+  - This should NOT happen with the Pro version
+  - The script uses O(n log n) pitch-mapped lookups, not O(n²) scanning
+  - If still slow, the issue is likely in FL Studio's UI rendering, not
+    the script's algorithm
+
+===========================================================================

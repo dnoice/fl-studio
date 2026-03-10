@@ -1,111 +1,257 @@
-"""Note Spreader - Distribute notes across pan, color groups, and velocity layers.
+"""Note Spreader Pro - Distribute notes across pan, color, velocity, and filter.
 
-Useful for creating stereo width, assigning MIDI channels for multi-timbral
-instruments, or creating velocity-layered parts.
+Spreads notes across the stereo field, assigns MIDI channels via color
+groups, layers velocity by pitch, or maps filter cutoff. Features
+deterministic seeded randomization for preview/accept consistency,
+explicit note ordering for stable alternate patterns, and consistent
+Amount blending across all modes including color.
+
+Enhanced from audit recommendations for production-grade note distribution.
 """
 
 import flpianoroll as flp
-import math
 
 
+# ---------------------------------------------------------------------------
+# Mode and option definitions
+# ---------------------------------------------------------------------------
 SPREAD_MODES = [
     'Pan - Left to Right by Pitch',
     'Pan - Alternate Left/Right',
-    'Pan - Random Spread',
+    'Pan - Random (Seeded)',
     'Color - By Pitch Class',
     'Color - By Octave',
     'Color - Alternate',
-    'Velocity - Layer by Pitch',
-    'Filter Cutoff - By Pitch',
+    'Velocity - By Pitch',
+    'Filter Cutoff (Mod X) - By Pitch',
     'Combined - Pan + Color',
 ]
 
+NOTE_ORDERS = [
+    'Time then Pitch',
+    'Pitch then Time',
+    'As Returned (Score Index)',
+]
 
-def createDialog():
+
+# ---------------------------------------------------------------------------
+# Deterministic per-note random (preview/accept stable)
+# ---------------------------------------------------------------------------
+def _xorshift32(x):
+    """XorShift32 PRNG step."""
+    x &= 0xFFFFFFFF
+    x ^= (x << 13) & 0xFFFFFFFF
+    x ^= (x >> 17) & 0xFFFFFFFF
+    x ^= (x << 5) & 0xFFFFFFFF
+    return x & 0xFFFFFFFF
+
+
+def _rand01(seed, note_time, note_number, idx):
+    """Deterministic pseudo-random float in [0, 1] from note identity.
+
+    Produces the same value for the same note regardless of when apply()
+    is called — critical for preview/accept consistency.
+    """
+    x = seed & 0xFFFFFFFF
+    x ^= (note_time * 0x9E3779B1) & 0xFFFFFFFF
+    x ^= (note_number * 0x85EBCA6B) & 0xFFFFFFFF
+    x ^= ((idx + 1) * 0xC2B2AE35) & 0xFFFFFFFF
+    x = _xorshift32(x)
+    return x / 0xFFFFFFFF
+
+
+# ---------------------------------------------------------------------------
+# Math helpers
+# ---------------------------------------------------------------------------
+def _clamp(x, lo, hi):
+    if x < lo:
+        return lo
+    if x > hi:
+        return hi
+    return x
+
+
+def _lerp(a, b, t):
+    """Linear interpolation from a to b by t."""
+    return a + (b - a) * t
+
+
+def _blend(old_value, target_value, amount):
+    """Blend from old to target by amount (0=no change, 1=full apply)."""
+    return old_value + (target_value - old_value) * amount
+
+
+# ---------------------------------------------------------------------------
+# Control Surface .fst support
+# ---------------------------------------------------------------------------
+_FST_FILE = 'Note Spreader.fst'
+
+
+def _try_load_surface():
+    """Attempt to load the Control Surface .fst GUI."""
+    try:
+        form = flp.LoadSurface(_FST_FILE)
+        if form is not None:
+            return form
+    except Exception:
+        pass
+    return None
+
+
+def _build_standard_dialog():
+    """Build the standard ScriptDialog fallback UI."""
     form = flp.ScriptDialog(
-        'Note Spreader',
-        'Distributes notes across pan, color, velocity, or filter parameters.\r\n'
-        'Pan modes spread notes across the stereo field.\r\n'
-        'Color modes assign MIDI channels for multi-timbral use.\r\n'
-        'Amount controls the intensity of the spread.'
+        'Note Spreader Pro',
+        'Distributes notes across pan, color, velocity, or filter cutoff.\r\n\r\n'
+        'Amount is a blend: 0 = no change, 1 = fully apply the mapping.\r\n'
+        'This applies consistently to ALL modes including color.\r\n\r\n'
+        'Random modes use a deterministic Seed so preview matches accept.\r\n'
+        'Note Order controls sorting for stable alternate patterns.\r\n\r\n'
+        'Min/Max knobs let you constrain the target range for pan,\r\n'
+        'velocity, and filter cutoff mappings.\r\n\r\n'
+        'Note: Color groups route to separate MIDI channels in FL Studio.\r\n'
+        'Changing colors on slide notes may affect slide behavior.'
     )
+    # --- Mode ---
     form.AddInputCombo('Spread Mode', SPREAD_MODES, 0)
+    form.AddInputCombo('Note Order', NOTE_ORDERS, 0)
     form.AddInputKnob('Amount', 1.0, 0.0, 1.0)
+    form.AddInputKnobInt('Seed', 0, 0, 9999)
+    # --- Ranges ---
+    form.AddInputKnob('Pan Min', 0.0, 0.0, 1.0)
+    form.AddInputKnob('Pan Max', 1.0, 0.0, 1.0)
+    form.AddInputKnob('Velocity Min', 0.4, 0.0, 1.0)
+    form.AddInputKnob('Velocity Max', 1.0, 0.0, 1.0)
+    form.AddInputKnob('ModX Min', 0.0, 0.0, 1.0)
+    form.AddInputKnob('ModX Max', 1.0, 0.0, 1.0)
+    # --- Options ---
     form.AddInputKnobInt('Max Colors', 16, 2, 16)
+    form.AddInputCheckbox('Ignore Muted Notes', True)
     form.AddInputCheckbox('Selected Notes Only', True)
     return form
 
 
-def apply(form):
-    spread_mode = int(form.GetInputValue('Spread Mode'))
-    amount = form.GetInputValue('Amount')
-    max_colors = int(form.GetInputValue('Max Colors'))
-    selected_only = form.GetInputValue('Selected Notes Only')
+def createDialog():
+    """Try Control Surface first, fall back to ScriptDialog."""
+    form = _try_load_surface()
+    if form is not None:
+        return form
+    return _build_standard_dialog()
 
+
+# ---------------------------------------------------------------------------
+# Apply — deterministic, order-stable, Amount-consistent
+# ---------------------------------------------------------------------------
+def apply(form):
+    mode = int(form.GetInputValue('Spread Mode'))
+    order_mode = int(form.GetInputValue('Note Order'))
+    amount = _clamp(form.GetInputValue('Amount'), 0.0, 1.0)
+    seed = int(form.GetInputValue('Seed'))
+    pan_min = _clamp(form.GetInputValue('Pan Min'), 0.0, 1.0)
+    pan_max = _clamp(form.GetInputValue('Pan Max'), 0.0, 1.0)
+    vel_min = _clamp(form.GetInputValue('Velocity Min'), 0.0, 1.0)
+    vel_max = _clamp(form.GetInputValue('Velocity Max'), 0.0, 1.0)
+    modx_min = _clamp(form.GetInputValue('ModX Min'), 0.0, 1.0)
+    modx_max = _clamp(form.GetInputValue('ModX Max'), 0.0, 1.0)
+    max_colors = int(_clamp(int(form.GetInputValue('Max Colors')), 2, 16))
+    ignore_muted = bool(form.GetInputValue('Ignore Muted Notes'))
+    selected_only = bool(form.GetInputValue('Selected Notes Only'))
+
+    # Ensure min <= max (swap if inverted)
+    if pan_min > pan_max:
+        pan_min, pan_max = pan_max, pan_min
+    if vel_min > vel_max:
+        vel_min, vel_max = vel_max, vel_min
+    if modx_min > modx_max:
+        modx_min, modx_max = modx_max, modx_min
+
+    # Collect notes
     notes = []
     for i in range(flp.score.noteCount):
-        note = flp.score.getNote(i)
-        if selected_only and not note.selected:
+        n = flp.score.getNote(i)
+        if ignore_muted:
+            try:
+                if n.muted:
+                    continue
+            except Exception:
+                pass
+        if selected_only and not n.selected:
             continue
-        notes.append(note)
+        notes.append(n)
 
     if not notes:
         return
 
-    # Get pitch range for normalization
+    # Explicit stable ordering for alternate modes
+    if order_mode == 0:
+        notes.sort(key=lambda n: (n.time, n.number, n.length))
+    elif order_mode == 1:
+        notes.sort(key=lambda n: (n.number, n.time, n.length))
+    # else: keep as returned (raw score index)
+
+    # Pitch normalization for pitch-driven mappings
     pitches = [n.number for n in notes]
     min_pitch = min(pitches)
     max_pitch = max(pitches)
     pitch_range = max_pitch - min_pitch
 
-    # Simple RNG for random modes
-    import time as _time
-    rng_state = _time.time_ns()
+    def norm_pitch(note_number):
+        if pitch_range <= 0:
+            return 0.5
+        return (note_number - min_pitch) / pitch_range
 
-    for idx, note in enumerate(notes):
-        t = (note.number - min_pitch) / pitch_range if pitch_range > 0 else 0.5
+    # Process each note in-place
+    for idx, n in enumerate(notes):
+        t = norm_pitch(n.number)
+        r = _rand01(seed, n.time, n.number, idx)
 
-        if spread_mode == 0:    # Pan - Left to Right by Pitch
-            note.pan = 0.5 + (t - 0.5) * amount
+        # --- PAN MODES ---
+        if mode == 0:    # Pan - Left to Right by Pitch
+            target = _lerp(pan_min, pan_max, t)
+            n.pan = _blend(n.pan, target, amount)
 
-        elif spread_mode == 1:  # Pan - Alternate Left/Right
-            if idx % 2 == 0:
-                note.pan = 0.5 - 0.4 * amount
-            else:
-                note.pan = 0.5 + 0.4 * amount
+        elif mode == 1:  # Pan - Alternate Left/Right
+            target = pan_min if (idx % 2 == 0) else pan_max
+            n.pan = _blend(n.pan, target, amount)
 
-        elif spread_mode == 2:  # Pan - Random Spread
-            rng_state = (rng_state * 1103515245 + 12345) & 0x7FFFFFFF
-            rand_val = rng_state / 0x7FFFFFFF
-            note.pan = 0.5 + (rand_val - 0.5) * amount
+        elif mode == 2:  # Pan - Random (Seeded)
+            target = _lerp(pan_min, pan_max, r)
+            n.pan = _blend(n.pan, target, amount)
 
-        elif spread_mode == 3:  # Color - By Pitch Class
-            pitch_class = note.number % 12
-            note.color = pitch_class % max_colors
+        # --- COLOR MODES (note.color is int 0..15) ---
+        elif mode == 3:  # Color - By Pitch Class
+            target = (n.number % 12) % max_colors
+            n.color = int(round(_blend(float(n.color), float(target), amount)))
 
-        elif spread_mode == 4:  # Color - By Octave
-            octave = note.number // 12
-            note.color = octave % max_colors
+        elif mode == 4:  # Color - By Octave
+            octave = n.number // 12
+            target = octave % max_colors
+            n.color = int(round(_blend(float(n.color), float(target), amount)))
 
-        elif spread_mode == 5:  # Color - Alternate
-            note.color = idx % max_colors
+        elif mode == 5:  # Color - Alternate
+            target = idx % max_colors
+            n.color = int(round(_blend(float(n.color), float(target), amount)))
 
-        elif spread_mode == 6:  # Velocity - Layer by Pitch
-            # Higher notes get higher velocity
-            target_vel = 0.4 + 0.6 * t
-            note.velocity = note.velocity + (target_vel - note.velocity) * amount
+        # --- VELOCITY ---
+        elif mode == 6:  # Velocity - By Pitch
+            target = _lerp(vel_min, vel_max, t)
+            n.velocity = _blend(n.velocity, target, amount)
 
-        elif spread_mode == 7:  # Filter Cutoff - By Pitch
-            # Map pitch to filter cutoff
-            note.fcut = 0.5 + (t - 0.5) * amount
+        # --- FILTER CUTOFF / MOD X ---
+        elif mode == 7:  # Filter Cutoff (Mod X) - By Pitch
+            target = _lerp(modx_min, modx_max, t)
+            n.fcut = _blend(n.fcut, target, amount)
 
-        elif spread_mode == 8:  # Combined - Pan + Color
-            # Pan by pitch position
-            note.pan = 0.5 + (t - 0.5) * amount
-            # Color by pitch class
-            note.color = (note.number % 12) % max_colors
+        # --- COMBINED ---
+        elif mode == 8:  # Combined - Pan + Color
+            target_pan = _lerp(pan_min, pan_max, t)
+            n.pan = _blend(n.pan, target_pan, amount)
+            target_color = (n.number % 12) % max_colors
+            n.color = int(round(_blend(float(n.color), float(target_color),
+                                       amount)))
 
-        # Clamp values
-        note.pan = max(0.0, min(1.0, note.pan))
-        note.velocity = max(0.0, min(1.0, note.velocity))
-        note.fcut = max(0.0, min(1.0, note.fcut))
+        # Clamp to documented API ranges
+        n.pan = _clamp(n.pan, 0.0, 1.0)
+        n.velocity = _clamp(n.velocity, 0.0, 1.0)
+        n.fcut = _clamp(n.fcut, 0.0, 1.0)
+        n.color = int(_clamp(int(n.color), 0, 15))

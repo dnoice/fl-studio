@@ -1,0 +1,216 @@
+===========================================================================
+  BASS LINE GENERATOR PRO — Control Surface (.fst) Build Guide
+===========================================================================
+
+  This guide tells you exactly how to build the custom GUI in FL Studio's
+  Control Surface plugin. When done, the script auto-detects and uses it.
+  If the .fst file is missing, the script falls back to the standard dialog.
+
+  REQUIREMENTS: FL Studio 24.1.0 or later (LoadSurface API)
+
+===========================================================================
+  STEP 1: CREATE THE CONTROL SURFACE PRESET
+===========================================================================
+
+  1. Open FL Studio
+  2. Add a new "Control Surface" plugin instance (Add > More Plugins)
+  3. Right-click the Control Surface title bar > choose a dark background
+  4. Build the layout described below using drag-and-drop controls
+  5. When done: Presets menu > "Save preset as..." >
+     Save as: "Bass Line Generator.fst"
+  6. Copy the .fst file to your piano roll scripts folder:
+     Documents\Image-Line\FL Studio\Settings\Piano roll scripts\
+
+  The script looks for a file named exactly: "Bass Line Generator.fst"
+
+===========================================================================
+  STEP 2: LAYOUT — THREE ZONES
+===========================================================================
+
+  +---------------------+---------------------+------------------+
+  |  ZONE 1: STYLE &    |  ZONE 2: HARMONY    |  ZONE 3: OUTPUT  |
+  |  RHYTHM             |  & DETECTION         |  & OPTIONS       |
+  +---------------------+---------------------+------------------+
+
+---------------------------------------------------------------------------
+  ZONE 1: STYLE & RHYTHM (left panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)        | Range / Options        | Default
+  ------------------|---------------------|------------------------|--------
+  Knob (integer)  | Bass Style          | 0-10 (11 styles)       | 2
+  Knob (integer)  | Octave              | 0-3 (4 octave ranges)  | 2
+  Knob| Velocity            | 0.10 to 1.00           | 0.78
+  Knob| Note Length (%)     | 0.10 to 1.00           | 0.85
+  Knob| Swing               | 0.00 to 0.50           | 0.00
+
+  BASS STYLE VALUES:
+    0  = Whole Notes (sustained)
+    1  = Half Notes
+    2  = Quarter Notes
+    3  = Eighth Notes (driving)
+    4  = Octave Bounce (up)
+    5  = Octave Bounce (down)
+    6  = Root-Fifth
+    7  = Root-Fifth-Octave
+    8  = Walking Bass (jazz)
+    9  = Syncopated (funk)
+    10 = Arpeggiated
+
+  OCTAVE VALUES (FL Studio labeling — C5 = middle C):
+    0 = C0 (sub bass)      — MIDI 0
+    1 = C1 (deep bass)     — MIDI 12
+    2 = C2 (standard bass) — MIDI 24
+    3 = C3 (upper bass)    — MIDI 36
+
+---------------------------------------------------------------------------
+  ZONE 2: HARMONY & DETECTION (center panel) — THE STAR FEATURE
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)           | Range / Options  | Default
+  ------------------|------------------------|------------------|--------
+  Knob (integer)  | Bass Follows           | 0-2 (3 modes)    | 0
+  Knob (integer)  | Approach               | 0-3 (4 modes)    | 0
+  Knob (integer)  | Chord Window           | 0-4 (5 sizes)    | 2
+
+  BASS FOLLOWS VALUES:
+    0 = Chord Root (harmonic)  — template-matched root, best for most genres
+    1 = Bass Note (lowest)     — follows inversions, for slash chord bass
+    2 = Hybrid (prefer root)   — uses root, but respects strong inversions
+
+  APPROACH NOTE VALUES:
+    0 = Off
+    1 = Chromatic (half step below next root)
+    2 = Diatonic (nearest in-scale note, uses piano roll scale highlighting)
+    3 = Enclosure (above then below — jazz/funk double approach)
+
+  CHORD WINDOW VALUES:
+    0 = 1/32 note  (very tight — only simultaneous notes)
+    1 = 1/16 note  (tight grouping)
+    2 = 1/8 note   (default — good for block chords)
+    3 = 1/4 note   (wide — catches strummed chords)
+    4 = 1/2 note   (very wide — catches arpeggiated chords)
+
+  VISUAL TIP: The Bass Follows combo is the most important control here.
+  Make it prominent with a label "HARMONY DETECTION" above this zone.
+
+---------------------------------------------------------------------------
+  ZONE 3: OUTPUT & OPTIONS (right panel)
+---------------------------------------------------------------------------
+
+  Control Type      | Name (EXACT)           | Range / Options | Default
+  ------------------|------------------------|-----------------|--------
+  CheckBox     | Voice Leading          | 0 or 1          | 1 (on)
+  CheckBox     | Keep Original Notes    | 0 or 1          | 1 (on)
+
+  VOICE LEADING:
+  - When ON, the script minimizes interval jumps between chord roots
+  - Bass notes stay as close as possible to the previous note
+  - Penalizes jumps > 7 semitones for smooth movement
+  - When OFF, all bass notes lock to the selected octave
+
+  KEEP ORIGINAL NOTES:
+  - When ON, your input chords/melody remain in the piano roll
+  - When OFF, only the generated bass notes appear
+  - Generated notes always use Color 15 for easy identification
+
+===========================================================================
+  STEP 3: CONTROL NAMING — CRITICAL
+===========================================================================
+
+  The script reads values using form.GetInputValue('Control Name').
+  Control names MUST match EXACTLY (case-sensitive, including spaces):
+
+    "Bass Style"
+    "Octave"
+    "Bass Follows"
+    "Approach"
+    "Chord Window"
+    "Velocity"
+    "Note Length (%)"
+    "Swing"
+    "Voice Leading"
+    "Keep Original Notes"
+
+  In Control Surface:
+  - Right-click any control > Properties
+  - Set the "Caption" field to the exact name above
+  - This is what GetInputValue() reads
+
+===========================================================================
+  STEP 4: VISUAL DESIGN SUGGESTIONS
+===========================================================================
+
+  BACKGROUND:  Dark gray or black (#1a1a1a or similar)
+  ZONE BORDERS: Subtle lighter gray lines separating the three zones
+  LABELS:       White text, uppercase section headers:
+                "STYLE & RHYTHM"    "HARMONY"    "OUTPUT"
+
+  RECOMMENDED SIZES:
+  - Zone 1 (Style & Rhythm): ~220px wide — 2 mode knobs + 3 knobs
+  - Zone 2 (Harmony):        ~200px wide — 3 mode knobs stacked
+  - Zone 3 (Output):         ~130px wide — 2 toggles
+
+  TOTAL SIZE:               ~550 x 280 pixels works well
+
+  COLOR CODING (optional):
+  - Style & Rhythm:   Blue accent
+  - Harmony:          Orange/amber accent (key decisions)
+  - Output:           Green accent
+
+===========================================================================
+  STEP 5: TESTING
+===========================================================================
+
+  1. Save the .fst file to the piano roll scripts folder
+  2. Restart FL Studio
+  3. Open the piano roll > Tools > Scripts > Bass Line Generator
+  4. If the .fst loads, you'll see your custom GUI
+  5. If not, you'll see the standard dialog
+
+  TESTING WORKFLOW:
+  - Draw a 4-chord progression (e.g., C-Am-F-G) in block chords
+  - Run with "Chord Root" mode — bass should follow C, A, F, G
+  - Invert the Am chord (C-E-A) and try "Bass Note" mode
+    — bass should follow C (the lowest note)
+  - Try "Chord Root" mode on the same inversion
+    — bass should still detect A as the root
+  - Enable Voice Leading — watch for smoother movement between roots
+  - Try Walking Bass style in 3/4 time signature
+    — should generate 3 beats per bar, not 4
+
+===========================================================================
+  TROUBLESHOOTING
+===========================================================================
+
+  "I see the standard dialog, not my custom GUI"
+  - Verify FL Studio version is 24.1.0 or later
+  - Verify the .fst file is named exactly "Bass Line Generator.fst"
+  - Verify the .fst is in the piano roll scripts folder
+
+  "Bass notes appear in the wrong octave"
+  - FL Studio labels C5 as middle C (MIDI 60)
+  - C0 = MIDI 0, C1 = MIDI 12, C2 = MIDI 24, C3 = MIDI 36
+  - Octave presets match FL's labeling convention
+
+  "Generated notes stack up on repeated runs"
+  - This should not happen — the script removes color 15 notes first
+  - If it does, check that no other script uses color 15
+
+  "Inversions detected wrong"
+  - Try switching Bass Follows between Root/Bass Note/Hybrid
+  - Root mode uses template matching (best for most cases)
+  - Bass Note mode always follows the lowest note
+  - Hybrid prefers root but respects strong inversions
+
+  "Diatonic approach notes sound wrong"
+  - Make sure scale highlighting is set in the piano roll
+  - Go to Helpers > Scale highlighting and set your key/scale
+  - The script reads snap_scale_helper for scale information
+
+  "Funk pattern sounds wrong in 3/4"
+  - The script adapts the slot grid to the time signature
+  - 3/4 uses a 12-slot pattern instead of 16-slot
+  - Results may differ from the classic 4/4 funk feel
+
+===========================================================================

@@ -1,0 +1,221 @@
+"""Bit Crusher - Lo-fi bit depth and sample rate reduction for Edison.
+
+Reduces bit depth and/or sample rate to create classic lo-fi,
+retro gaming, and digital distortion effects. Includes multiple
+crush modes, dithering options, and a dry/wet mix for blending.
+"""
+
+from enveditor import *
+import math
+
+CRUSH_MODES = [
+    'Classic (bit + rate)',
+    'Bit Depth Only',
+    'Sample Rate Only',
+    'Mu-Law Compression',
+    'Soft Crush (wavefold)',
+    'Zero-Order Hold',
+]
+
+DITHER_MODES = [
+    'None',
+    'Rectangular (RPDF)',
+    'Triangular (TPDF)',
+]
+
+BIT_DEPTH_LABELS = [
+    '1-bit (extreme)',
+    '2-bit',
+    '3-bit',
+    '4-bit (retro)',
+    '5-bit',
+    '6-bit',
+    '8-bit (classic)',
+    '10-bit',
+    '12-bit (lo-fi)',
+    '14-bit',
+    '16-bit (CD)',
+]
+
+BIT_DEPTHS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16]
+
+RATE_LABELS = [
+    '1000 Hz (telephone)',
+    '2000 Hz',
+    '4000 Hz (walkie-talkie)',
+    '5512 Hz (Amiga)',
+    '8000 Hz (phone)',
+    '11025 Hz (quarter CD)',
+    '16000 Hz',
+    '22050 Hz (half CD)',
+    '32000 Hz',
+    '44100 Hz (CD - no change)',
+]
+
+RATE_VALUES = [1000, 2000, 4000, 5512, 8000, 11025, 16000, 22050, 32000, 44100]
+
+# Simple LCG random for dithering
+_rng = 42
+
+
+def _rand():
+    global _rng
+    _rng = (_rng * 1103515245 + 12345) & 0x7FFFFFFF
+    return (_rng / 0x7FFFFFFF) * 2.0 - 1.0  # -1 to +1
+
+
+def createDialog():
+    form = ScriptDialog(
+        'Bit Crusher',
+        'Lo-fi bit depth and sample rate reduction.\r\n\r\n'
+        'Classic: Reduces both bit depth and sample rate together.\r\n'
+        'Mu-Law: Telephone-style logarithmic compression.\r\n'
+        'Soft Crush: Wavefold distortion for analog-style grit.\r\n'
+        'Zero-Order Hold: Staircase effect from holding sample values.\r\n\r\n'
+        'Dithering adds noise to reduce quantization artifacts.\r\n'
+        'Use Dry/Wet to blend the effect with the original signal.'
+    )
+    form.AddInputCombo('Mode', CRUSH_MODES, 0)
+    form.AddInputCombo('Bit Depth', BIT_DEPTH_LABELS, 6)
+    form.AddInputCombo('Sample Rate', RATE_LABELS, 4)
+    form.AddInputCombo('Dither', DITHER_MODES, 0)
+    form.AddInputKnob('Drive (dB)', 0.0, 0.0, 24.0)
+    form.AddInputKnob('Dry/Wet', 1.0, 0.0, 1.0)
+    return form
+
+
+def apply(form):
+    mode = int(form.GetInputValue('Mode'))
+    bit_idx = int(form.GetInputValue('Bit Depth'))
+    rate_idx = int(form.GetInputValue('Sample Rate'))
+    dither_mode = int(form.GetInputValue('Dither'))
+    drive_db = form.GetInputValue('Drive (dB)')
+    dry_wet = form.GetInputValue('Dry/Wet')
+
+    bits = BIT_DEPTHS[bit_idx]
+    target_rate = RATE_VALUES[rate_idx]
+
+    sample = EditorSample
+    sr = sample.SampleRate
+    length = sample.Length
+    num_channels = sample.NumChans
+
+    # Selection range
+    sel_start = Editor.SelectionStartS
+    sel_end = Editor.SelectionEndS
+    if sel_start == sel_end:
+        sel_start = 0
+        sel_end = length
+
+    total = sel_end - sel_start
+    if total <= 0:
+        return
+
+    # Pre-calculate values
+    drive_gain = 10.0 ** (drive_db / 20.0)
+    levels = 2 ** bits
+    half_levels = levels / 2.0
+
+    # Rate reduction ratio
+    rate_ratio = max(1.0, sr / target_rate)
+
+    # Sample-and-hold state for rate reduction
+    hold_values = [0.0] * num_channels
+    hold_counter = 0.0
+
+    # Seed the RNG
+    global _rng
+    _rng = total & 0x7FFFFFFF
+    if _rng == 0:
+        _rng = 42
+
+    for pos in range(sel_start, sel_end):
+        # Rate reduction: decide whether to sample a new value
+        hold_counter += 1.0
+        sample_new = hold_counter >= rate_ratio
+        if sample_new:
+            hold_counter -= rate_ratio
+
+        for ch in range(num_channels):
+            dry_val = sample.GetSampleAt(pos, ch)
+
+            if mode == 1:
+                # Bit depth only (no rate reduction)
+                val = dry_val * drive_gain
+                val = _quantize(val, half_levels, levels, dither_mode)
+                wet_val = val / drive_gain if drive_gain > 0 else val
+
+            elif mode == 2:
+                # Sample rate only (no bit reduction)
+                if sample_new:
+                    hold_values[ch] = dry_val
+                wet_val = hold_values[ch]
+
+            elif mode == 3:
+                # Mu-Law compression
+                val = dry_val * drive_gain
+                mu = float(levels - 1)
+                sign = 1.0 if val >= 0 else -1.0
+                compressed = sign * math.log1p(mu * abs(val)) / math.log1p(mu)
+                # Quantize the compressed signal
+                compressed = _quantize(compressed, half_levels, levels, dither_mode)
+                # Expand back
+                expanded = sign * (1.0 / mu) * ((1.0 + mu) ** abs(compressed) - 1.0)
+                wet_val = expanded / drive_gain if drive_gain > 0 else expanded
+
+            elif mode == 4:
+                # Soft crush (wavefold)
+                val = dry_val * drive_gain
+                # Wavefold: wrap signal when it exceeds -1..1
+                while abs(val) > 1.0:
+                    if val > 1.0:
+                        val = 2.0 - val
+                    elif val < -1.0:
+                        val = -2.0 - val
+                # Then quantize
+                val = _quantize(val, half_levels, levels, dither_mode)
+                wet_val = val
+
+            elif mode == 5:
+                # Zero-Order Hold (staircase)
+                if sample_new:
+                    val = dry_val * drive_gain
+                    val = _quantize(val, half_levels, levels, dither_mode)
+                    hold_values[ch] = val
+                wet_val = hold_values[ch]
+
+            else:
+                # Classic: bit + rate
+                if sample_new:
+                    val = dry_val * drive_gain
+                    val = _quantize(val, half_levels, levels, dither_mode)
+                    hold_values[ch] = val / drive_gain if drive_gain > 0 else val
+                wet_val = hold_values[ch]
+
+            # Clamp
+            wet_val = max(-1.0, min(1.0, wet_val))
+
+            # Dry/wet mix
+            out = dry_val * (1.0 - dry_wet) + wet_val * dry_wet
+            sample.SetSampleAt(pos, ch, out)
+
+        # Progress
+        if (pos - sel_start) % 10000 == 0:
+            Utils.ProgressMsg('Bit Crusher...', pos - sel_start, total)
+
+
+def _quantize(val, half_levels, levels, dither_mode):
+    """Quantize a sample value to the given bit depth."""
+    # Add dither before quantization
+    if dither_mode == 1:
+        # Rectangular dither (RPDF)
+        val += _rand() / levels
+    elif dither_mode == 2:
+        # Triangular dither (TPDF) - sum of two rectangular
+        val += (_rand() + _rand()) / levels
+
+    # Quantize: round to nearest level
+    quantized = math.floor(val * half_levels + 0.5) / half_levels
+
+    # Clamp to valid range
+    return max(-1.0, min(1.0, quantized))
